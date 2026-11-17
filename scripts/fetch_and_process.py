@@ -196,6 +196,14 @@ def resolve_doi_metadata(doi):
             elif page_str:
                 start_page = page_str.strip()
 
+            alt_ids = msg.get("alternative-id", [])
+            pii = alt_ids[0] if alt_ids else ""
+            if not pii:
+                res_url = msg.get("resource", {}).get("primary", {}).get("URL", "")
+                pii_m = re.search(r'/pii/([A-Z0-9]+)', res_url, re.I)
+                if pii_m:
+                    pii = pii_m.group(1)
+
             return {
                 "doi": clean,
                 "title": title or f"Paper {clean}",
@@ -206,6 +214,7 @@ def resolve_doi_metadata(doi):
                 "issue": str(msg.get("issue", "")),
                 "start_page": start_page,
                 "end_page": end_page,
+                "pii": pii,
                 "url": f"https://doi.org/{clean}",
             }
     except Exception as e:
@@ -233,7 +242,7 @@ def find_paper_in_catalogue(doi):
     return None
 
 
-def step_a_download_paper(doi, institution, state_path=None, output_dir=None, direct_url=None, headless=True):
+def step_a_download_paper(doi, institution, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True):
     """Step A: Download raw paper PDF using authenticated institutional session."""
     clean_doi = normalize_doi(doi)
     safe_name = doi_to_filename(clean_doi)
@@ -262,139 +271,272 @@ def step_a_download_paper(doi, institution, state_path=None, output_dir=None, di
     except ImportError:
         raise RuntimeError("Playwright is required for browser retrieval. Run: pip install playwright")
 
+    # Detect ScienceDirect / Elsevier DOI (10.1016/)
+    is_sciencedirect = "10.1016/" in clean_doi or (direct_url and "sciencedirect" in direct_url.lower())
+
     # Construct candidate download URLs
     target_article_url = direct_url or f"https://doi.org/{clean_doi}"
     proxied_article_url = auth_setup.get_proxied_url(target_article_url, institution)
 
     # Publisher direct heuristics
     direct_candidates = []
-    if "10.1002/" in clean_doi or "wiley" in proxied_article_url.lower():
+    if is_sciencedirect:
+        print("⚡ Detected ScienceDirect / Elsevier DOI. Activating specialized resolver...")
+        sd_pii = pii
+        if not sd_pii and direct_url and "/pii/" in direct_url:
+            m = re.search(r'/pii/([A-Z0-9]+)', direct_url, re.I)
+            if m:
+                sd_pii = m.group(1)
+        if not sd_pii:
+            res_meta = resolve_doi_metadata(clean_doi)
+            if res_meta and res_meta.get("pii"):
+                sd_pii = res_meta["pii"]
+
+        if sd_pii:
+            sd_canonical = f"https://www.sciencedirect.com/science/article/pii/{sd_pii}"
+            proxied_article_url = auth_setup.get_proxied_url(sd_canonical, institution)
+            print(f"Targeting canonical ScienceDirect PII endpoint: {sd_pii}")
+
+    elif "10.1002/" in clean_doi or "wiley" in proxied_article_url.lower():
         # Wiley Online Library direct binary endpoint
         wiley_direct = f"https://onlinelibrary.wiley.com/doi/pdfdirect/{clean_doi}"
         direct_candidates.append(auth_setup.get_proxied_url(wiley_direct, institution))
 
-    if "10.1007/" in clean_doi or "10.1038/" in clean_doi or "springer" in proxied_article_url.lower():
+    elif "10.1007/" in clean_doi or "10.1038/" in clean_doi or "springer" in proxied_article_url.lower():
         springer_direct = f"https://link.springer.com/content/pdf/{clean_doi}.pdf"
         direct_candidates.append(auth_setup.get_proxied_url(springer_direct, institution))
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
         context = browser.new_context(
             storage_state=str(session_file),
             accept_downloads=True,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
 
         pdf_bytes = None
+        intercepted_pdfs = []
 
-        # Strategy 1: Try authenticated direct PDF endpoint
-        for candidate in direct_candidates:
-            print(f"Attempting direct PDF retrieval via {candidate[:80]}...")
-            try:
-                resp = context.request.get(candidate, timeout=25000)
-                if resp.status == 200:
-                    body = resp.body()
-                    if body.startswith(b"%PDF-") and len(body) > 10000:
-                        print(f"✓ Direct PDF endpoint returned {len(body):,} bytes.")
-                        pdf_bytes = body
-                        break
-            except Exception as e:
-                print(f"  Direct probe note: {e}")
+        def on_response_stream(res):
+            ct = res.headers.get("content-type", "").lower()
+            if "application/pdf" in ct and res.status == 200:
+                try:
+                    b = res.body()
+                    if b.startswith(b"%PDF-") and len(b) > 5000:
+                        intercepted_pdfs.append(b)
+                except Exception:
+                    pass
 
-        # Strategy 2: Navigate proxied page and capture viewer/iframe or download trigger
-        if not pdf_bytes:
-            print(f"Navigating to proxied article page: {proxied_article_url}")
+        page.on("response", on_response_stream)
+
+        # Specialized ScienceDirect / Elsevier Resolver
+        if is_sciencedirect:
+            print(f"Navigating to ScienceDirect article: {proxied_article_url}")
             page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(3000)
 
-            # Check if current response or page is directly a PDF
-            content_type = page.evaluate("() => document.contentType")
-            if content_type == "application/pdf":
-                pdf_bytes = page.content().encode("utf-8")
+            # Extract PII from page URL if not already known
+            if not sd_pii:
+                pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I)
+                if pii_m:
+                    sd_pii = pii_m.group(1)
+                    print(f"Extracted ScienceDirect PII from page URL: {sd_pii}")
 
-            # Check for embedded PDF iframe (e.g., Wiley viewer: iframe#pdf-iframe)
+            # 1. Target direct PII / PDF endpoint structures
+            if sd_pii:
+                pii_endpoints = [
+                    f"https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/{sd_pii}/pdfft?download=true",
+                    f"https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/{sd_pii}/pdf?download=true",
+                    f"https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/{sd_pii}/pdf",
+                    f"https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/{sd_pii}/pdfft",
+                ]
+
+                # Check on-page View PDF button / tokenized link
+                view_pdf_btn = page.query_selector('a:has-text("View PDF"), a.link-button:has-text("PDF"), a[aria-label*="PDF"], a[href*="pdfft"], a[href*="/pdf"]')
+                if view_pdf_btn:
+                    token_href = view_pdf_btn.get_attribute("href")
+                    if token_href:
+                        full_token_url = token_href if token_href.startswith("http") else page.url.split("/science/")[0] + token_href
+                        pii_endpoints.insert(0, full_token_url)
+                        pii_endpoints.insert(1, full_token_url.replace("/pdfft?", "/pdf?"))
+
+                for cand in pii_endpoints:
+                    try:
+                        print(f"Probing ScienceDirect PII endpoint: {cand[:80]}...")
+                        resp = context.request.get(cand, headers={"Referer": page.url}, timeout=20000)
+                        if resp.status == 200:
+                            body = resp.body()
+                            if body.startswith(b"%PDF-") and len(body) > 10000:
+                                print(f"✓ ScienceDirect direct endpoint returned {len(body):,} bytes.")
+                                pdf_bytes = body
+                                break
+                    except Exception as e:
+                        print(f"  PII probe note: {e}")
+
+            # 2. Check response interception or viewer frames
+            if not pdf_bytes and intercepted_pdfs:
+                pdf_bytes = intercepted_pdfs[0]
+                print(f"✓ Intercepted PDF response stream ({len(pdf_bytes):,} bytes).")
+
             if not pdf_bytes:
-                for selector in ["iframe#pdf-iframe", "iframe[src*='pdf']", "embed[type='application/pdf']", "iframe"]:
+                for selector in ["iframe[src*='pdf']", "embed[type='application/pdf']", "object[type='application/pdf']", "iframe#pdf-js-viewer"]:
                     el = page.query_selector(selector)
                     if el:
-                        src = el.get_attribute("src")
-                        if src and ("pdf" in src.lower() or "direct" in src.lower()):
-                            iframe_url = src if src.startswith("http") else page.url.split("/doi/")[0] + src
-                            print(f"Found embedded PDF source: {iframe_url[:80]}...")
+                        src = el.get_attribute("src") or el.get_attribute("data")
+                        if src and src.startswith("http"):
+                            print(f"Found embedded PDF frame: {src[:80]}...")
                             try:
-                                resp = context.request.get(iframe_url, timeout=30000)
+                                resp = context.request.get(src, timeout=30000)
+                                if resp.status == 200 and resp.body().startswith(b"%PDF-"):
+                                    pdf_bytes = resp.body()
+                                    break
+                            except Exception:
+                                pass
+
+            # 3. High-Fidelity Verified Full-Text Capture Fallback (if asset CDN is challenge-gated)
+            if not pdf_bytes:
+                body_text = page.inner_text("body")
+                has_inst_access = any(inst_term in page.url.lower() or inst_term in body_text.lower() for inst_term in ["vanderbilt", "full text access", "brought to you by"])
+                has_sections = len(body_text) > 8000 and any(h in body_text.lower() for h in ["introduction", "abstract", "references"])
+
+                if has_inst_access and has_sections:
+                    print("Capturing verified institutional full-text article via high-fidelity print-to-PDF...")
+                    # Clean UI overlays and non-article elements before print
+                    page.evaluate('''() => {
+                        const removeSelectors = [
+                            '#reading-assistant-container-expanded',
+                            '#reading-assistant-container',
+                            '#popover-trigger-reading-assistant',
+                            '.accessbar-utility',
+                            '.navigation-bar',
+                            'header',
+                            'footer',
+                            'aside',
+                            '#banner',
+                            '.popover-container',
+                            'button',
+                            '.button'
+                        ];
+                        removeSelectors.forEach(sel => {
+                            document.querySelectorAll(sel).forEach(el => el.remove());
+                        });
+                    }''')
+                    page.pdf(path=str(pdf_path), format="A4", print_background=True)
+                    print(f"✓ Captured full-text PDF to {pdf_path}")
+
+        else:
+            # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
+            # Strategy 1: Try authenticated direct PDF endpoint
+            for candidate in direct_candidates:
+                print(f"Attempting direct PDF retrieval via {candidate[:80]}...")
+                try:
+                    resp = context.request.get(candidate, timeout=25000)
+                    if resp.status == 200:
+                        body = resp.body()
+                        if body.startswith(b"%PDF-") and len(body) > 10000:
+                            print(f"✓ Direct PDF endpoint returned {len(body):,} bytes.")
+                            pdf_bytes = body
+                            break
+                except Exception as e:
+                    print(f"  Direct probe note: {e}")
+
+            # Strategy 2: Navigate proxied page and capture viewer/iframe or download trigger
+            if not pdf_bytes:
+                print(f"Navigating to proxied article page: {proxied_article_url}")
+                page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(3000)
+
+                # Check if current response or page is directly a PDF
+                content_type = page.evaluate("() => document.contentType")
+                if content_type == "application/pdf":
+                    pdf_bytes = page.content().encode("utf-8")
+
+                # Check for embedded PDF iframe (e.g., Wiley viewer: iframe#pdf-iframe)
+                if not pdf_bytes:
+                    for selector in ["iframe#pdf-iframe", "iframe[src*='pdf']", "embed[type='application/pdf']", "iframe"]:
+                        el = page.query_selector(selector)
+                        if el:
+                            src = el.get_attribute("src")
+                            if src and ("pdf" in src.lower() or "direct" in src.lower()):
+                                iframe_url = src if src.startswith("http") else page.url.split("/doi/")[0] + src
+                                print(f"Found embedded PDF source: {iframe_url[:80]}...")
+                                try:
+                                    resp = context.request.get(iframe_url, timeout=30000)
+                                    if resp.status == 200:
+                                        body = resp.body()
+                                        if body.startswith(b"%PDF-"):
+                                            pdf_bytes = body
+                                            break
+                                except Exception as e:
+                                    print(f"  Iframe fetch note: {e}")
+
+                # Check for candidate PDF links on the page (HighWire, Silverchair, Wiley, Springer, etc.)
+                if not pdf_bytes:
+                    try:
+                        links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
+                        sorted_links = sorted(
+                            [l for l in links if l and l.startswith("http")],
+                            key=lambda x: (
+                                0 if ".full.pdf" in x.lower() else
+                                1 if "pdfdirect" in x.lower() else
+                                2 if x.lower().endswith(".pdf") else
+                                3 if "/pdf/" in x.lower() else 4
+                            )
+                        )
+                        for href in sorted_links:
+                            print(f"Testing candidate PDF link: {href[:80]}...")
+                            try:
+                                resp = context.request.get(href, timeout=30000)
                                 if resp.status == 200:
+                                    body = resp.body()
+                                    if body.startswith(b"%PDF-") and len(body) > 10000:
+                                        print(f"✓ Downloaded PDF via link ({len(body):,} bytes).")
+                                        pdf_bytes = body
+                                        break
+                            except Exception as e:
+                                print(f"  Link probe note: {e}")
+                    except Exception as e:
+                        print(f"  Link evaluation note: {e}")
+
+                # Check for standard PDF download buttons/links with browser download event
+                if not pdf_bytes:
+                    download_selectors = [
+                        "a[data-article-pdf='true']",
+                        "a.pdf-download-btn",
+                        "a[href*='pdfdirect']",
+                        "a[href*='/doi/pdf/']",
+                        "a[href*='/doi/epdf/']",
+                        "a:has-text('Download PDF')",
+                        "a:has-text('PDF')",
+                    ]
+                    for btn_sel in download_selectors:
+                        btn = page.query_selector(btn_sel)
+                        if btn:
+                            href = btn.get_attribute("href")
+                            if href and href.startswith("http"):
+                                print(f"Attempting download link: {href[:80]}...")
+                                try:
+                                    resp = context.request.get(href, timeout=30000)
                                     body = resp.body()
                                     if body.startswith(b"%PDF-"):
                                         pdf_bytes = body
                                         break
-                            except Exception as e:
-                                print(f"  Iframe fetch note: {e}")
-
-            # Check for candidate PDF links on the page (HighWire, Silverchair, Wiley, Springer, etc.)
-            if not pdf_bytes:
-                try:
-                    links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
-                    # Prioritize full text PDF links
-                    sorted_links = sorted(
-                        [l for l in links if l and l.startswith("http")],
-                        key=lambda x: (
-                            0 if ".full.pdf" in x.lower() else
-                            1 if "pdfdirect" in x.lower() else
-                            2 if x.lower().endswith(".pdf") else
-                            3 if "/pdf/" in x.lower() else 4
-                        )
-                    )
-                    for href in sorted_links:
-                        print(f"Testing candidate PDF link: {href[:80]}...")
-                        try:
-                            resp = context.request.get(href, timeout=30000)
-                            if resp.status == 200:
-                                body = resp.body()
-                                if body.startswith(b"%PDF-") and len(body) > 10000:
-                                    print(f"✓ Downloaded PDF via link ({len(body):,} bytes).")
-                                    pdf_bytes = body
-                                    break
-                        except Exception as e:
-                            print(f"  Link probe note: {e}")
-                except Exception as e:
-                    print(f"  Link evaluation note: {e}")
-
-            # Check for standard PDF download buttons/links with browser download event
-            if not pdf_bytes:
-                download_selectors = [
-                    "a[data-article-pdf='true']",
-                    "a.pdf-download-btn",
-                    "a[href*='pdfdirect']",
-                    "a[href*='/doi/pdf/']",
-                    "a[href*='/doi/epdf/']",
-                    "a:has-text('Download PDF')",
-                    "a:has-text('PDF')",
-                ]
-                for btn_sel in download_selectors:
-                    btn = page.query_selector(btn_sel)
-                    if btn:
-                        href = btn.get_attribute("href")
-                        if href and href.startswith("http"):
-                            print(f"Attempting download link: {href[:80]}...")
+                                except Exception:
+                                    pass
                             try:
-                                resp = context.request.get(href, timeout=30000)
-                                body = resp.body()
-                                if body.startswith(b"%PDF-"):
-                                    pdf_bytes = body
-                                    break
+                                with page.expect_download(timeout=10000) as download_info:
+                                    btn.click()
+                                download = download_info.value
+                                download.save_as(str(pdf_path))
+                                print("✓ Download triggered via browser event.")
+                                break
                             except Exception:
                                 pass
-                        try:
-                            with page.expect_download(timeout=10000) as download_info:
-                                btn.click()
-                            download = download_info.value
-                            download.save_as(str(pdf_path))
-                            print("✓ Download triggered via browser event.")
-                            break
-                        except Exception:
-                            pass
 
         browser.close()
 
@@ -737,6 +879,7 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
             state_path=state_path,
             output_dir=output_dir,
             direct_url=metadata.get("url"),
+            pii=metadata.get("pii"),
             headless=headless
         )
 

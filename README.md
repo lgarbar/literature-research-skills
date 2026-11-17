@@ -102,15 +102,15 @@ flowchart TD
 3. **Run the End-to-End Pipeline (Download → Markdown → Zotero)**:
    Retrieve papers, convert them into clean structured Markdown, and sync or package them for Zotero in a single step:
    ```sh
-   # Process via target DOI
-   python3 scripts/fetch_and_process.py --doi "10.1002/cphy.c170043"
+   # Process via target DOI (supports Wiley, Springer, HighWire, and Elsevier/ScienceDirect)
+   python3 scripts/fetch_and_process.py --doi "10.1016/j.tics.2006.10.012"
 
    # Process via citation RIS file
    python3 scripts/fetch_and_process.py --ris "review/citations.ris"
    ```
 
    **Pipeline Stages:**
-   - **Step A (Download)**: Uses the active institutional session to stream the raw PDF from publisher gateways or direct binary endpoints into `downloads/`, verified via `source_files.py`.
+   - **Step A (Download)**: Uses the active institutional session to stream raw PDFs from publisher gateways or direct binary endpoints (including specialized ScienceDirect PII resolution and response interception) into `downloads/`, verified via `source_files.py`.
    - **Step B (Markdown Conversion)**: Employs `pymupdf4llm` to extract document structure, headers, and tables into `working/source-text/<doi>.md` with YAML frontmatter.
    - **Step C (Zotero Sync / Intake)**: If `ZOTERO_USER_ID` and `ZOTERO_API_KEY` are present in `.env`, automatically creates the Zotero library item and attaches both PDF and Markdown note. Otherwise, generates a verified offline intake package (`working/zotero_intake/<doi>/`) containing `citation.ris`, `paper.pdf`, `notes.md`, and `manifest.json`.
 
