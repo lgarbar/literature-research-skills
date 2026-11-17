@@ -42,23 +42,36 @@ Documented external integrations: **PubMed MCP**, **Scite MCP**, direct **LibKey
 
 This repository supports dynamic institutional proxy routing across top universities worldwide (with preconfigured EZproxy prefixes and library portals in `config/universities.json`, including Vanderbilt University).
 
-### Architecture & Routing Workflow
+### Architecture & End-to-End Pipeline
+
+The retrieval architecture is decoupled into a dedicated session manager and an end-to-end processing pipeline:
 
 ```mermaid
 flowchart TD
-    User["User / Agent"] -->|"1. Run select_university.py"| Selector["Interactive University Selector (scripts/select_university.py)"]
-    Selector -->|"Loads Database"| UniDB["Top 100 Universities (config/universities.json)"]
-    Selector -->|"Saves Selection"| Config["Active Institution Config (config/active_institution.json & .env)"]
-    
-    Config -->|"Reads Proxy Prefix & Portal"| Auth["Playwright Authentication (auth_setup.py)"]
-    Auth -->|"2. Interactive Login & MFA"| IdP["Institutional SSO / EZproxy (e.g. Vanderbilt proxy)"]
-    IdP -->|"3. Persists Cookies"| SessionState["Authenticated Session (state/storage_state.json)"]
-    
-    PaperReq["Paper Retrieval Request (DOI / URL)"] --> Router["Proxy URL Rewriter (get_proxied_url)"]
-    Config --> Router
-    Router -->|"Rewritten Proxied Link"| Resolver["LibKey / Publisher Gateway"]
-    SessionState --> Resolver
-    Resolver -->|"4. Download Full-Text PDF"| VerifiedFile["Verified Local Article (downloads/)"]
+    subgraph AuthSession["1. Institutional Authentication & Session (scripts/auth_setup.py)"]
+        User["User / Agent"] -->|"Run select_university.py"| Selector["University Selector (scripts/select_university.py)"]
+        Selector -->|"Loads Database"| UniDB["Top 100 Universities (config/universities.json)"]
+        Selector -->|"Saves Selection"| Config["Active Config (config/active_institution.json & .env)"]
+        Config --> Auth["Playwright SSO Login (scripts/auth_setup.py)"]
+        Auth -->|"Interactive Login / MFA"| IdP["Institutional SSO / EZproxy (e.g. Vanderbilt)"]
+        IdP -->|"Persists Session"| SessionState["Storage State (state/storage_state.json)"]
+    end
+
+    subgraph Pipeline["2. End-to-End Processing Pipeline (scripts/fetch_and_process.py)"]
+        Input["Target Input (DOI string or .ris file)"] --> StepA["Step A: Authenticated Download"]
+        Config -.-> StepA
+        SessionState -.-> StepA
+        StepA -->|"PDF Stream / Iframe Capture"| RawPDF["Raw PDF (downloads/<doi>.pdf)"]
+        RawPDF -->|"Mechanical Verification"| StepB["Step B: Markdown Conversion (PyMuPDF4LLM)"]
+        StepB -->|"Layout Parsing + YAML Frontmatter"| SourceMD["Structured Markdown (working/source-text/<doi>.md)"]
+        
+        SourceMD --> StepC{"Step C: Zotero Sync or Intake Package"}
+        RawPDF --> StepC
+        
+        StepC -->|"If ZOTERO_API_KEY Configured"| ZoteroCloud["PyZotero Cloud Sync (Item + PDF + Note)"]
+        StepC -->|"Default / Offline Fallback"| IntakePkg["Verified Zotero Intake Package (working/zotero_intake/<doi>/)"]
+        IntakePkg --> IntakeFiles["• citation.ris\n• paper.pdf\n• notes.md\n• manifest.json"]
+    end
 ```
 
 ### Quick Setup
@@ -74,22 +87,32 @@ flowchart TD
    ```
    This automatically updates `config/active_institution.json` and your local `.env`.
 
-2. **Authenticate with Your Library Portal**:
-   Open an interactive Playwright browser session to sign in through your institution's SSO / Duo MFA:
+2. **Authenticate with Your Library Portal (One-Time SSO)**:
+   Launch the decoupled Playwright session manager to sign in through your institution's SSO / Duo MFA:
    ```sh
+   python3 scripts/auth_setup.py
+   # or convenience entrypoint:
    python3 auth_setup.py
    ```
-   Your authenticated session cookies are saved securely to `state/storage_state.json` (gitignored).
-
-3. **Retrieve and Verify Full-Text Articles**:
-   Generate proxied links or automate full-text paper downloads using your active session:
+   Your authenticated session cookies are saved securely to `state/storage_state.json` (gitignored). You can verify session status anytime via:
    ```sh
-   # Generate a proxied resolver link
-   python3 auth_setup.py --proxy-url "10.1002/cphy.c170043"
-
-   # Download full text PDF using authenticated session
-   python3 auth_setup.py --download "10.1002/cphy.c170043"
+   python3 scripts/auth_setup.py --check
    ```
+
+3. **Run the End-to-End Pipeline (Download → Markdown → Zotero)**:
+   Retrieve papers, convert them into clean structured Markdown, and sync or package them for Zotero in a single step:
+   ```sh
+   # Process via target DOI
+   python3 scripts/fetch_and_process.py --doi "10.1002/cphy.c170043"
+
+   # Process via citation RIS file
+   python3 scripts/fetch_and_process.py --ris "review/citations.ris"
+   ```
+
+   **Pipeline Stages:**
+   - **Step A (Download)**: Uses the active institutional session to stream the raw PDF from publisher gateways or direct binary endpoints into `downloads/`, verified via `source_files.py`.
+   - **Step B (Markdown Conversion)**: Employs `pymupdf4llm` to extract document structure, headers, and tables into `working/source-text/<doi>.md` with YAML frontmatter.
+   - **Step C (Zotero Sync / Intake)**: If `ZOTERO_USER_ID` and `ZOTERO_API_KEY` are present in `.env`, automatically creates the Zotero library item and attaches both PDF and Markdown note. Otherwise, generates a verified offline intake package (`working/zotero_intake/<doi>/`) containing `citation.ris`, `paper.pdf`, `notes.md`, and `manifest.json`.
 
 ## What the workflow preserves
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Institutional Library Authentication & Proxy Routing using Playwright.
+"""Institutional Library Authentication & Session Manager using Playwright.
 
-Dynamically loads the active institution configured via scripts/select_university.py
-(or config/active_institution.json / .env) and manages authenticated browser sessions,
-EZproxy URL rewriting, and automated subscription paper retrieval.
+Dedicated to handling one-time institutional SSO authentication, cookie capture,
+session persistence, and dynamic EZproxy URL rewriting.
 """
 import argparse
 from datetime import datetime, timezone
@@ -11,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import sys
 import time
 
@@ -20,7 +20,6 @@ UNIVERSITIES_FILE = ROOT / "config" / "universities.json"
 ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_PATH = ROOT / "state" / "storage_state.json"
 COMPAT_STATE_PATH = ROOT / "institutional_auth.json"
-DOWNLOADS_DIR = ROOT / "downloads"
 
 
 def load_env_vars():
@@ -42,7 +41,7 @@ def get_active_institution():
     Resolution order:
     1. config/active_institution.json
     2. Environment variables (.env or os.environ)
-    3. First available entry in config/universities.json
+    3. Default to Vanderbilt University in config/universities.json
     """
     load_env_vars()
 
@@ -69,24 +68,27 @@ def get_active_institution():
             "login_portal": os.environ.get("ACTIVE_INSTITUTION_LOGIN_PORTAL", env_proxy.split("?")[0]),
         }
 
-    # 3. Fallback to the first university listed in config/universities.json
+    # 3. Fallback to Vanderbilt University in config/universities.json
     if UNIVERSITIES_FILE.is_file():
         try:
             with open(UNIVERSITIES_FILE, "r", encoding="utf-8") as f:
                 universities = json.load(f)
+                vanderbilt = next((u for u in universities if u.get("id") == "vanderbilt"), None)
+                if vanderbilt:
+                    return vanderbilt
                 if universities:
                     return universities[0]
         except Exception:
             pass
 
-    # Generic fallback if no config files exist at all
+    # Hardcoded default fallback
     return {
-        "id": "generic",
-        "name": "Configured Institution",
+        "id": "vanderbilt",
+        "name": "Vanderbilt University",
         "country": "United States",
-        "ezproxy_prefix": "https://ezproxy.institution.edu/login?url=",
-        "library_portal": "https://library.institution.edu",
-        "login_portal": "https://ezproxy.institution.edu/login",
+        "ezproxy_prefix": "http://proxy.library.vanderbilt.edu/login?url=",
+        "library_portal": "https://www.library.vanderbilt.edu",
+        "login_portal": "http://proxy.library.vanderbilt.edu/login",
     }
 
 
@@ -178,13 +180,6 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
 
             start_time = time.time()
             initial_url = page.url
-            
-            # Extract domain keywords dynamically from the institution config to detect return to portal
-            portal_domain = ""
-            lib_portal = inst.get("library_portal", "")
-            if "://" in lib_portal:
-                portal_domain = lib_portal.split("://")[1].split("/")[0].lower()
-
             while time.time() - start_time < timeout_sec:
                 try:
                     if page.is_closed() or not browser.is_connected():
@@ -193,21 +188,18 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
 
                     current_url = page.url
                     cookies = context.cookies()
-                    
-                    # Detect if user has navigated past login/SSO back to library domain or proxy session
-                    is_sso = any(auth_host in current_url.lower() for auth_host in ["okta.com", "duo.", "shibboleth", "/saml", "/sso", "login.microsoftonline.com"])
-                    has_auth_cookies = any("ezp" in c["name"].lower() or "proxy" in c["name"].lower() or "session" in c["name"].lower() for c in cookies)
-                    
-                    at_home_domain = portal_domain and portal_domain in current_url.lower()
 
-                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or at_home_domain):
+                    # Detect if user has successfully navigated through SSO/SAML
+                    is_sso = any(auth_host in current_url.lower() for auth_host in ["onevu.", "okta.com", "duo.", "shibboleth", "/saml", "/sso"])
+                    has_auth_cookies = any("ezp" in c["name"].lower() or "proxy" in c["name"].lower() or "session" in c["name"].lower() for c in cookies)
+
+                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or "vanderbilt" in current_url):
                         print(f"\n✓ Detected authenticated destination: {current_url}")
                         page.wait_for_timeout(2000)
                         break
 
                     # Check for terminal ENTER key without blocking
                     try:
-                        import select
                         if select.select([sys.stdin], [], [], 0)[0]:
                             sys.stdin.readline()
                             print("\nConfirmation received from terminal.")
@@ -234,153 +226,8 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     print(f"\n✓ Institutional authentication state successfully saved to:")
     print(f"  • {save_path}")
     print(f"  • {COMPAT_STATE_PATH}")
-    print("Downstream tools and paper-fulltext-access can now reuse this session for subscription recovery.")
+    print("Downstream tools and paper retrieval pipelines can now reuse this session for subscription recovery.")
     return True
-
-
-def download_paper(identifier, output_path=None, state_path=None, headless=True, institution=None):
-    """Retrieve and download a full-text PDF using the authenticated session."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("Error: Playwright is not installed.", file=sys.stderr)
-        return False
-
-    inst = institution or get_active_institution()
-    existing_state = get_existing_state_path(state_path)
-    if not existing_state:
-        print("Error: No saved authentication session found. Run 'python3 auth_setup.py' first.", file=sys.stderr)
-        return False
-
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    target_doi = identifier
-    doi_match = re.search(r"10\.\d{4,9}/\S+", identifier)
-    if doi_match:
-        target_doi = doi_match.group(0).rstrip(".,;")
-
-    # Prefer LibKey direct resolver, falling back to proxied DOI
-    libkey_url = f"https://libkey.io/{target_doi}"
-    proxied_url = get_proxied_url(f"https://doi.org/{target_doi}", inst)
-
-    out_file = Path(output_path) if output_path else (DOWNLOADS_DIR / f"{target_doi.replace('/', '_')}.pdf")
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-
-    print("=" * 70)
-    print(" 📥 Downloading Paper via Institutional Session")
-    print("=" * 70)
-    print(f"Target DOI:        {target_doi}")
-    print(f"Institution:       {inst.get('name')}")
-    print(f"Session State:     {existing_state}")
-    print(f"Output Destination:{out_file}")
-    print("-" * 70)
-
-    download_success = False
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            storage_state=str(existing_state),
-            accept_downloads=True,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
-
-        try:
-            # 1. First attempt: Direct publisher binary endpoints (e.g. Wiley pdfdirect)
-            direct_endpoints = [
-                get_proxied_url(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{target_doi}", inst),
-                get_proxied_url(f"https://onlinelibrary.wiley.com/doi/pdf/{target_doi}", inst)
-            ]
-            for ep in direct_endpoints:
-                try:
-                    res = context.request.get(ep, timeout=20000)
-                    body = res.body()
-                    if body.startswith(b"%PDF-"):
-                        out_file.write_bytes(body)
-                        download_success = True
-                        print(f"✓ Downloaded PDF directly via binary endpoint: {ep}")
-                        break
-                except Exception:
-                    pass
-
-            # 2. Second attempt: Navigate to proxied publisher page and detect PDF iframe / links
-            if not download_success:
-                print(f"Navigating to proxied article page: {proxied_url}")
-                page.goto(proxied_url, timeout=35000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
-
-                # Check iframe / embed src
-                pdf_frame = page.locator("iframe#pdf-iframe, iframe[src*='pdf'], embed[src*='pdf']")
-                if pdf_frame.count() > 0:
-                    src = pdf_frame.first.get_attribute("src")
-                    if src:
-                        from urllib.parse import urljoin
-                        full_pdf_url = urljoin(page.url, src)
-                        print(f"Fetching embedded PDF frame: {full_pdf_url}")
-                        res = context.request.get(full_pdf_url, timeout=25000)
-                        body = res.body()
-                        if body.startswith(b"%PDF-"):
-                            out_file.write_bytes(body)
-                            download_success = True
-                            print("✓ Downloaded PDF from embedded frame stream.")
-
-                # Check on-page links matching pdfdirect or pdf
-                if not download_success:
-                    links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
-                    for href in links:
-                        if "/pdfdirect/" in href or "/pdf/" in href or href.endswith(".pdf"):
-                            print(f"Testing PDF link: {href}")
-                            try:
-                                res = context.request.get(href, timeout=20000)
-                                body = res.body()
-                                if body.startswith(b"%PDF-"):
-                                    out_file.write_bytes(body)
-                                    download_success = True
-                                    print(f"✓ Downloaded PDF from page link: {href}")
-                                    break
-                            except Exception:
-                                pass
-
-            # 3. Third attempt: LibKey fallback
-            if not download_success:
-                print(f"Trying LibKey resolver: {libkey_url}")
-                page.goto(libkey_url, timeout=30000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
-                selectors = [
-                    ".pdf-download-link",
-                    "a.article-pdfLink",
-                    "button:has-text('Download PDF')",
-                    "a:has-text('Download PDF')",
-                    "a[href*='pdf']"
-                ]
-                for sel in selectors:
-                    loc = page.locator(sel)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        try:
-                            with page.expect_download(timeout=15000) as download_info:
-                                loc.first.click()
-                            download = download_info.value
-                            download.save_as(str(out_file))
-                            download_success = True
-                            print("✓ Downloaded via LibKey download event.")
-                            break
-                        except Exception:
-                            pass
-        except Exception as exc:
-            print(f"Download navigation note: {exc}")
-        finally:
-            browser.close()
-
-    if download_success and out_file.is_file() and out_file.stat().st_size > 0:
-        print(f"\n✓ Successfully downloaded PDF ({out_file.stat().st_size:,} bytes):")
-        print(f"  {out_file}")
-        return True
-    else:
-        print(f"\nCould not automatically trigger file download via headless browser.")
-        print(f"Please open the proxied link or LibKey in your browser:")
-        print(f"  • LibKey:  {libkey_url}")
-        print(f"  • Proxied: {proxied_url}")
-        return False
 
 
 def check_session(state_path=None):
@@ -409,9 +256,7 @@ def check_session(state_path=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", help="Target paper URL or DOI to access through the institutional proxy")
-    parser.add_argument("--download", "-d", help="Download PDF for DOI or URL using the authenticated session")
-    parser.add_argument("--output", "-o", help="Output path for downloaded PDF")
+    parser.add_argument("--url", help="Target paper URL or login destination")
     parser.add_argument("--check", action="store_true", help="Check if existing authenticated session state exists")
     parser.add_argument("--proxy-url", help="Rewrite and print the proxied URL for a given DOI or article link")
     parser.add_argument("--state-path", help=f"Custom path for session state JSON (default: {DEFAULT_STATE_PATH})")
@@ -436,16 +281,6 @@ def main():
     if args.check:
         valid = check_session(args.state_path)
         return 0 if valid else 1
-
-    if args.download:
-        success = download_paper(
-            identifier=args.download,
-            output_path=args.output,
-            state_path=args.state_path,
-            headless=args.headless,
-            institution=inst
-        )
-        return 0 if success else 1
 
     success = authenticate_interactive(
         institution=inst,
