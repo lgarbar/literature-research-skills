@@ -42,7 +42,7 @@ def get_active_institution():
     Resolution order:
     1. config/active_institution.json
     2. Environment variables (.env or os.environ)
-    3. Default to Vanderbilt University in config/universities.json
+    3. First available entry in config/universities.json
     """
     load_env_vars()
 
@@ -69,27 +69,24 @@ def get_active_institution():
             "login_portal": os.environ.get("ACTIVE_INSTITUTION_LOGIN_PORTAL", env_proxy.split("?")[0]),
         }
 
-    # 3. Fallback to Vanderbilt University in config/universities.json
+    # 3. Fallback to the first university listed in config/universities.json
     if UNIVERSITIES_FILE.is_file():
         try:
             with open(UNIVERSITIES_FILE, "r", encoding="utf-8") as f:
                 universities = json.load(f)
-                vanderbilt = next((u for u in universities if u.get("id") == "vanderbilt"), None)
-                if vanderbilt:
-                    return vanderbilt
                 if universities:
                     return universities[0]
         except Exception:
             pass
 
-    # Hardcoded default fallback
+    # Generic fallback if no config files exist at all
     return {
-        "id": "vanderbilt",
-        "name": "Vanderbilt University",
+        "id": "generic",
+        "name": "Configured Institution",
         "country": "United States",
-        "ezproxy_prefix": "http://proxy.library.vanderbilt.edu/login?url=",
-        "library_portal": "https://www.library.vanderbilt.edu",
-        "login_portal": "http://proxy.library.vanderbilt.edu/login",
+        "ezproxy_prefix": "https://ezproxy.institution.edu/login?url=",
+        "library_portal": "https://library.institution.edu",
+        "login_portal": "https://ezproxy.institution.edu/login",
     }
 
 
@@ -181,6 +178,13 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
 
             start_time = time.time()
             initial_url = page.url
+            
+            # Extract domain keywords dynamically from the institution config to detect return to portal
+            portal_domain = ""
+            lib_portal = inst.get("library_portal", "")
+            if "://" in lib_portal:
+                portal_domain = lib_portal.split("://")[1].split("/")[0].lower()
+
             while time.time() - start_time < timeout_sec:
                 try:
                     if page.is_closed() or not browser.is_connected():
@@ -190,11 +194,13 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
                     current_url = page.url
                     cookies = context.cookies()
                     
-                    # Detect if user has successfully navigated through SSO/SAML
-                    is_sso = any(auth_host in current_url.lower() for auth_host in ["onevu.", "okta.com", "duo.", "shibboleth", "/saml", "/sso"])
+                    # Detect if user has navigated past login/SSO back to library domain or proxy session
+                    is_sso = any(auth_host in current_url.lower() for auth_host in ["okta.com", "duo.", "shibboleth", "/saml", "/sso", "login.microsoftonline.com"])
                     has_auth_cookies = any("ezp" in c["name"].lower() or "proxy" in c["name"].lower() or "session" in c["name"].lower() for c in cookies)
                     
-                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or "vanderbilt" in current_url):
+                    at_home_domain = portal_domain and portal_domain in current_url.lower()
+
+                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or at_home_domain):
                         print(f"\n✓ Detected authenticated destination: {current_url}")
                         page.wait_for_timeout(2000)
                         break
@@ -218,7 +224,6 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
 
         # Save session cookies and storage state
         context.storage_state(path=str(save_path))
-        # Also copy to COMPAT_STATE_PATH for backwards compatibility
         try:
             context.storage_state(path=str(COMPAT_STATE_PATH))
         except Exception:
@@ -280,59 +285,87 @@ def download_paper(identifier, output_path=None, state_path=None, headless=True,
         )
         page = context.new_page()
 
-        # Try route 1: LibKey
-        print(f"Navigating to: {libkey_url}")
         try:
-            page.goto(libkey_url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-
-            # Check if LibKey offers download button
-            selectors = [
-                ".pdf-download-link",
-                "a.article-pdfLink",
-                "a[data-action='download-pdf']",
-                "button:has-text('Download PDF')",
-                "a:has-text('Download PDF')",
-                "a:has-text('View PDF')",
-                "a[href*='pdf']"
+            # 1. First attempt: Direct publisher binary endpoints (e.g. Wiley pdfdirect)
+            direct_endpoints = [
+                get_proxied_url(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{target_doi}", inst),
+                get_proxied_url(f"https://onlinelibrary.wiley.com/doi/pdf/{target_doi}", inst)
             ]
-
-            clicked = False
-            for sel in selectors:
-                loc = page.locator(sel)
-                if loc.count() > 0 and loc.first.is_visible():
-                    print(f"Found PDF trigger: '{sel}'. Initiating download...")
-                    try:
-                        with page.expect_download(timeout=20000) as download_info:
-                            loc.first.click()
-                        download = download_info.value
-                        download.save_as(str(out_file))
+            for ep in direct_endpoints:
+                try:
+                    res = context.request.get(ep, timeout=20000)
+                    body = res.body()
+                    if body.startswith(b"%PDF-"):
+                        out_file.write_bytes(body)
                         download_success = True
-                        clicked = True
+                        print(f"✓ Downloaded PDF directly via binary endpoint: {ep}")
                         break
-                    except Exception as e:
-                        print(f"Click download warning: {e}")
+                except Exception:
+                    pass
 
-            if not clicked:
-                # Try route 2: Direct Proxied Publisher URL
-                print(f"Trying proxied publisher URL: {proxied_url}")
+            # 2. Second attempt: Navigate to proxied publisher page and detect PDF iframe / links
+            if not download_success:
+                print(f"Navigating to proxied article page: {proxied_url}")
                 page.goto(proxied_url, timeout=35000, wait_until="domcontentloaded")
                 page.wait_for_timeout(3000)
 
+                # Check iframe / embed src
+                pdf_frame = page.locator("iframe#pdf-iframe, iframe[src*='pdf'], embed[src*='pdf']")
+                if pdf_frame.count() > 0:
+                    src = pdf_frame.first.get_attribute("src")
+                    if src:
+                        from urllib.parse import urljoin
+                        full_pdf_url = urljoin(page.url, src)
+                        print(f"Fetching embedded PDF frame: {full_pdf_url}")
+                        res = context.request.get(full_pdf_url, timeout=25000)
+                        body = res.body()
+                        if body.startswith(b"%PDF-"):
+                            out_file.write_bytes(body)
+                            download_success = True
+                            print("✓ Downloaded PDF from embedded frame stream.")
+
+                # Check on-page links matching pdfdirect or pdf
+                if not download_success:
+                    links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
+                    for href in links:
+                        if "/pdfdirect/" in href or "/pdf/" in href or href.endswith(".pdf"):
+                            print(f"Testing PDF link: {href}")
+                            try:
+                                res = context.request.get(href, timeout=20000)
+                                body = res.body()
+                                if body.startswith(b"%PDF-"):
+                                    out_file.write_bytes(body)
+                                    download_success = True
+                                    print(f"✓ Downloaded PDF from page link: {href}")
+                                    break
+                            except Exception:
+                                pass
+
+            # 3. Third attempt: LibKey fallback
+            if not download_success:
+                print(f"Trying LibKey resolver: {libkey_url}")
+                page.goto(libkey_url, timeout=30000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                selectors = [
+                    ".pdf-download-link",
+                    "a.article-pdfLink",
+                    "button:has-text('Download PDF')",
+                    "a:has-text('Download PDF')",
+                    "a[href*='pdf']"
+                ]
                 for sel in selectors:
                     loc = page.locator(sel)
                     if loc.count() > 0 and loc.first.is_visible():
-                        print(f"Found publisher PDF trigger: '{sel}'. Downloading...")
                         try:
-                            with page.expect_download(timeout=20000) as download_info:
+                            with page.expect_download(timeout=15000) as download_info:
                                 loc.first.click()
                             download = download_info.value
                             download.save_as(str(out_file))
                             download_success = True
+                            print("✓ Downloaded via LibKey download event.")
                             break
-                        except Exception as e:
-                            print(f"Publisher download warning: {e}")
-
+                        except Exception:
+                            pass
         except Exception as exc:
             print(f"Download navigation note: {exc}")
         finally:
