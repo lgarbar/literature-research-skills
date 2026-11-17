@@ -38,6 +38,59 @@ Included source: **OpenAlex**, **Semantic Scholar**, **PMC/Europe PMC full-text 
 
 Documented external integrations: **PubMed MCP**, **Scite MCP**, direct **LibKey**, browser/source-reading tools, and optional **Zotero–Obsidian**. See the [dependency matrix](docs/dependencies.md) and [connector setup](docs/connectors.md). Personal API keys, paid accounts and institutional access are not included. Public discovery remains usable without institutional subscriptions.
 
+## Dynamic University Library Routing & Institutional Authentication
+
+This repository supports dynamic institutional proxy routing across top universities worldwide (with preconfigured EZproxy prefixes and library portals in `config/universities.json`, including Vanderbilt University).
+
+### Architecture & Routing Workflow
+
+```mermaid
+flowchart TD
+    User["User / Agent"] -->|"1. Run select_university.py"| Selector["Interactive University Selector (scripts/select_university.py)"]
+    Selector -->|"Loads Database"| UniDB["Top 100 Universities (config/universities.json)"]
+    Selector -->|"Saves Selection"| Config["Active Institution Config (config/active_institution.json & .env)"]
+    
+    Config -->|"Reads Proxy Prefix & Portal"| Auth["Playwright Authentication (auth_setup.py)"]
+    Auth -->|"2. Interactive Login & MFA"| IdP["Institutional SSO / EZproxy (e.g. Vanderbilt proxy)"]
+    IdP -->|"3. Persists Cookies"| SessionState["Authenticated Session (state/storage_state.json)"]
+    
+    PaperReq["Paper Retrieval Request (DOI / URL)"] --> Router["Proxy URL Rewriter (get_proxied_url)"]
+    Config --> Router
+    Router -->|"Rewritten Proxied Link"| Resolver["LibKey / Publisher Gateway"]
+    SessionState --> Resolver
+    Resolver -->|"4. Download Full-Text PDF"| VerifiedFile["Verified Local Article (downloads/)"]
+```
+
+### Quick Setup
+
+1. **Select Your University**:
+   Launch the interactive selection CLI:
+   ```sh
+   python3 scripts/select_university.py
+   ```
+   Or specify an institution directly by ID:
+   ```sh
+   python3 scripts/select_university.py --id vanderbilt
+   ```
+   This automatically updates `config/active_institution.json` and your local `.env`.
+
+2. **Authenticate with Your Library Portal**:
+   Open an interactive Playwright browser session to sign in through your institution's SSO / Duo MFA:
+   ```sh
+   python3 auth_setup.py
+   ```
+   Your authenticated session cookies are saved securely to `state/storage_state.json` (gitignored).
+
+3. **Retrieve and Verify Full-Text Articles**:
+   Generate proxied links or automate full-text paper downloads using your active session:
+   ```sh
+   # Generate a proxied resolver link
+   python3 auth_setup.py --proxy-url "10.1002/cphy.c170043"
+
+   # Download full text PDF using authenticated session
+   python3 auth_setup.py --download "10.1002/cphy.c170043"
+   ```
+
 ## What the workflow preserves
 
 - Stable paper/evidence IDs, exact search/access events, deduplication, pending work and resumable checkpoints.

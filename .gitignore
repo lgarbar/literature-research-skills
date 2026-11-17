@@ -9,6 +9,8 @@ __pycache__/
 .api-key
 .asta-api-key
 local-settings.json
+config/active_institution.json
+institutional_auth.json
 state/
 asta-tools.json
 *.sqlite3*

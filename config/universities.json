@@ -1,0 +1,906 @@
+[
+  {
+    "id": "vanderbilt",
+    "name": "Vanderbilt University",
+    "country": "United States",
+    "ezproxy_prefix": "http://proxy.library.vanderbilt.edu/login?url=",
+    "library_portal": "https://www.library.vanderbilt.edu",
+    "login_portal": "http://proxy.library.vanderbilt.edu/login"
+  },
+  {
+    "id": "harvard",
+    "name": "Harvard University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezp-prod1.hul.harvard.edu/login?url=",
+    "library_portal": "https://library.harvard.edu",
+    "login_portal": "https://ezp-prod1.hul.harvard.edu/login"
+  },
+  {
+    "id": "stanford",
+    "name": "Stanford University",
+    "country": "United States",
+    "ezproxy_prefix": "https://stanford.idm.oclc.org/login?url=",
+    "library_portal": "https://library.stanford.edu",
+    "login_portal": "https://stanford.idm.oclc.org/login"
+  },
+  {
+    "id": "mit",
+    "name": "Massachusetts Institute of Technology",
+    "country": "United States",
+    "ezproxy_prefix": "https://libproxy.mit.edu/login?url=",
+    "library_portal": "https://libraries.mit.edu",
+    "login_portal": "https://libproxy.mit.edu/login"
+  },
+  {
+    "id": "yale",
+    "name": "Yale University",
+    "country": "United States",
+    "ezproxy_prefix": "https://yale.idm.oclc.org/login?url=",
+    "library_portal": "https://library.yale.edu",
+    "login_portal": "https://yale.idm.oclc.org/login"
+  },
+  {
+    "id": "princeton",
+    "name": "Princeton University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.princeton.edu/login?url=",
+    "library_portal": "https://library.princeton.edu",
+    "login_portal": "https://ezproxy.princeton.edu/login"
+  },
+  {
+    "id": "columbia",
+    "name": "Columbia University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.cul.columbia.edu/login?url=",
+    "library_portal": "https://library.columbia.edu",
+    "login_portal": "https://ezproxy.cul.columbia.edu/login"
+  },
+  {
+    "id": "upenn",
+    "name": "University of Pennsylvania",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.library.upenn.edu/login?url=",
+    "library_portal": "https://www.library.upenn.edu",
+    "login_portal": "https://proxy.library.upenn.edu/login"
+  },
+  {
+    "id": "cornell",
+    "name": "Cornell University",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.library.cornell.edu/login?url=",
+    "library_portal": "https://www.library.cornell.edu",
+    "login_portal": "https://proxy.library.cornell.edu/login"
+  },
+  {
+    "id": "uchicago",
+    "name": "University of Chicago",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.uchicago.edu/login?url=",
+    "library_portal": "https://www.lib.uchicago.edu",
+    "login_portal": "https://proxy.uchicago.edu/login"
+  },
+  {
+    "id": "caltech",
+    "name": "California Institute of Technology",
+    "country": "United States",
+    "ezproxy_prefix": "https://clsproxy.library.caltech.edu/login?url=",
+    "library_portal": "https://library.caltech.edu",
+    "login_portal": "https://clsproxy.library.caltech.edu/login"
+  },
+  {
+    "id": "jhu",
+    "name": "Johns Hopkins University",
+    "country": "United States",
+    "ezproxy_prefix": "https://jhu.idm.oclc.org/login?url=",
+    "library_portal": "https://library.jhu.edu",
+    "login_portal": "https://jhu.idm.oclc.org/login"
+  },
+  {
+    "id": "northwestern",
+    "name": "Northwestern University",
+    "country": "United States",
+    "ezproxy_prefix": "https://turing.library.northwestern.edu/login?url=",
+    "library_portal": "https://www.library.northwestern.edu",
+    "login_portal": "https://turing.library.northwestern.edu/login"
+  },
+  {
+    "id": "duke",
+    "name": "Duke University",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.lib.duke.edu/login?url=",
+    "library_portal": "https://library.duke.edu",
+    "login_portal": "https://proxy.lib.duke.edu/login"
+  },
+  {
+    "id": "dartmouth",
+    "name": "Dartmouth College",
+    "country": "United States",
+    "ezproxy_prefix": "https://dartmouth.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.dartmouth.edu",
+    "login_portal": "https://dartmouth.idm.oclc.org/login"
+  },
+  {
+    "id": "brown",
+    "name": "Brown University",
+    "country": "United States",
+    "ezproxy_prefix": "https://revproxy.brown.edu/login?url=",
+    "library_portal": "https://library.brown.edu",
+    "login_portal": "https://revproxy.brown.edu/login"
+  },
+  {
+    "id": "berkeley",
+    "name": "University of California, Berkeley",
+    "country": "United States",
+    "ezproxy_prefix": "https://libproxy.berkeley.edu/login?url=",
+    "library_portal": "https://www.lib.berkeley.edu",
+    "login_portal": "https://libproxy.berkeley.edu/login"
+  },
+  {
+    "id": "ucla",
+    "name": "University of California, Los Angeles",
+    "country": "United States",
+    "ezproxy_prefix": "https://ucla.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.ucla.edu",
+    "login_portal": "https://ucla.idm.oclc.org/login"
+  },
+  {
+    "id": "ucsd",
+    "name": "University of California, San Diego",
+    "country": "United States",
+    "ezproxy_prefix": "https://ucsd.idm.oclc.org/login?url=",
+    "library_portal": "https://library.ucsd.edu",
+    "login_portal": "https://ucsd.idm.oclc.org/login"
+  },
+  {
+    "id": "ucsf",
+    "name": "University of California, San Francisco",
+    "country": "United States",
+    "ezproxy_prefix": "https://ucsf.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.ucsf.edu",
+    "login_portal": "https://ucsf.idm.oclc.org/login"
+  },
+  {
+    "id": "ucdavis",
+    "name": "University of California, Davis",
+    "country": "United States",
+    "ezproxy_prefix": "https://ucdavis.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.ucdavis.edu",
+    "login_portal": "https://ucdavis.idm.oclc.org/login"
+  },
+  {
+    "id": "ucsb",
+    "name": "University of California, Santa Barbara",
+    "country": "United States",
+    "ezproxy_prefix": "https://ucsb.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.ucsb.edu",
+    "login_portal": "https://ucsb.idm.oclc.org/login"
+  },
+  {
+    "id": "uci",
+    "name": "University of California, Irvine",
+    "country": "United States",
+    "ezproxy_prefix": "https://uci.idm.oclc.org/login?url=",
+    "library_portal": "https://www.lib.uci.edu",
+    "login_portal": "https://uci.idm.oclc.org/login"
+  },
+  {
+    "id": "umich",
+    "name": "University of Michigan",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.lib.umich.edu/login?url=",
+    "library_portal": "https://www.lib.umich.edu",
+    "login_portal": "https://proxy.lib.umich.edu/login"
+  },
+  {
+    "id": "nyu",
+    "name": "New York University",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.library.nyu.edu/login?url=",
+    "library_portal": "https://library.nyu.edu",
+    "login_portal": "https://proxy.library.nyu.edu/login"
+  },
+  {
+    "id": "cmu",
+    "name": "Carnegie Mellon University",
+    "country": "United States",
+    "ezproxy_prefix": "https://cmu.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.cmu.edu",
+    "login_portal": "https://cmu.idm.oclc.org/login"
+  },
+  {
+    "id": "rice",
+    "name": "Rice University",
+    "country": "United States",
+    "ezproxy_prefix": "https://rice.idm.oclc.org/login?url=",
+    "library_portal": "https://library.rice.edu",
+    "login_portal": "https://rice.idm.oclc.org/login"
+  },
+  {
+    "id": "wustl",
+    "name": "Washington University in St. Louis",
+    "country": "United States",
+    "ezproxy_prefix": "https://libproxy.wustl.edu/login?url=",
+    "library_portal": "https://library.wustl.edu",
+    "login_portal": "https://libproxy.wustl.edu/login"
+  },
+  {
+    "id": "emory",
+    "name": "Emory University",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.proxy.library.emory.edu/login?url=",
+    "library_portal": "https://libraries.emory.edu",
+    "login_portal": "https://login.proxy.library.emory.edu/login"
+  },
+  {
+    "id": "notredame",
+    "name": "University of Notre Dame",
+    "country": "United States",
+    "ezproxy_prefix": "https://nd.idm.oclc.org/login?url=",
+    "library_portal": "https://library.nd.edu",
+    "login_portal": "https://nd.idm.oclc.org/login"
+  },
+  {
+    "id": "georgetown",
+    "name": "Georgetown University",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.library.georgetown.edu/login?url=",
+    "library_portal": "https://library.georgetown.edu",
+    "login_portal": "https://proxy.library.georgetown.edu/login"
+  },
+  {
+    "id": "usc",
+    "name": "University of Southern California",
+    "country": "United States",
+    "ezproxy_prefix": "https://libproxy.usc.edu/login?url=",
+    "library_portal": "https://libraries.usc.edu",
+    "login_portal": "https://libproxy.usc.edu/login"
+  },
+  {
+    "id": "virginia",
+    "name": "University of Virginia",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.its.virginia.edu/login?url=",
+    "library_portal": "https://www.library.virginia.edu",
+    "login_portal": "https://proxy.its.virginia.edu/login"
+  },
+  {
+    "id": "unc",
+    "name": "University of North Carolina at Chapel Hill",
+    "country": "United States",
+    "ezproxy_prefix": "https://libproxy.lib.unc.edu/login?url=",
+    "library_portal": "https://library.unc.edu",
+    "login_portal": "https://libproxy.lib.unc.edu/login"
+  },
+  {
+    "id": "gatech",
+    "name": "Georgia Institute of Technology",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.gatech.idm.oclc.org/login?url=",
+    "library_portal": "https://library.gatech.edu",
+    "login_portal": "https://login.gatech.idm.oclc.org/login"
+  },
+  {
+    "id": "utexas",
+    "name": "University of Texas at Austin",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.lib.utexas.edu/login?url=",
+    "library_portal": "https://www.lib.utexas.edu",
+    "login_portal": "https://ezproxy.lib.utexas.edu/login"
+  },
+  {
+    "id": "uwmadison",
+    "name": "University of Wisconsin-Madison",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.library.wisc.edu/login?url=",
+    "library_portal": "https://www.library.wisc.edu",
+    "login_portal": "https://ezproxy.library.wisc.edu/login"
+  },
+  {
+    "id": "uiuc",
+    "name": "University of Illinois Urbana-Champaign",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy2.library.illinois.edu/login?url=",
+    "library_portal": "https://www.library.illinois.edu",
+    "login_portal": "https://proxy2.library.illinois.edu/login"
+  },
+  {
+    "id": "uwt",
+    "name": "University of Washington",
+    "country": "United States",
+    "ezproxy_prefix": "https://offcampus.lib.washington.edu/login?url=",
+    "library_portal": "https://www.lib.washington.edu",
+    "login_portal": "https://offcampus.lib.washington.edu/login"
+  },
+  {
+    "id": "osu",
+    "name": "Ohio State University",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.lib.ohio-state.edu/login?url=",
+    "library_portal": "https://library.osu.edu",
+    "login_portal": "https://proxy.lib.ohio-state.edu/login"
+  },
+  {
+    "id": "psu",
+    "name": "Pennsylvania State University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezaccess.libraries.psu.edu/login?url=",
+    "library_portal": "https://libraries.psu.edu",
+    "login_portal": "https://ezaccess.libraries.psu.edu/login"
+  },
+  {
+    "id": "purdue",
+    "name": "Purdue University",
+    "country": "United States",
+    "ezproxy_prefix": "https://purdue.idm.oclc.org/login?url=",
+    "library_portal": "https://www.lib.purdue.edu",
+    "login_portal": "https://purdue.idm.oclc.org/login"
+  },
+  {
+    "id": "umd",
+    "name": "University of Maryland, College Park",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy-bc.researchport.umd.edu/login?url=",
+    "library_portal": "https://www.lib.umd.edu",
+    "login_portal": "https://proxy-bc.researchport.umd.edu/login"
+  },
+  {
+    "id": "ufl",
+    "name": "University of Florida",
+    "country": "United States",
+    "ezproxy_prefix": "https://lp.hscl.ufl.edu/login?url=",
+    "library_portal": "https://library.ufl.edu",
+    "login_portal": "https://lp.hscl.ufl.edu/login"
+  },
+  {
+    "id": "umn",
+    "name": "University of Minnesota",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.ezproxy.lib.umn.edu/login?url=",
+    "library_portal": "https://www.lib.umn.edu",
+    "login_portal": "https://login.ezproxy.lib.umn.edu/login"
+  },
+  {
+    "id": "rutgers",
+    "name": "Rutgers University",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.proxy.libraries.rutgers.edu/login?url=",
+    "library_portal": "https://libraries.rutgers.edu",
+    "login_portal": "https://login.proxy.libraries.rutgers.edu/login"
+  },
+  {
+    "id": "tamu",
+    "name": "Texas A&M University",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.ezproxy.library.tamu.edu/login?url=",
+    "library_portal": "https://library.tamu.edu",
+    "login_portal": "https://login.ezproxy.library.tamu.edu/login"
+  },
+  {
+    "id": "indiana",
+    "name": "Indiana University Bloomington",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.lib.indiana.edu/login?url=",
+    "library_portal": "https://libraries.indiana.edu",
+    "login_portal": "https://ezproxy.lib.indiana.edu/login"
+  },
+  {
+    "id": "pitt",
+    "name": "University of Pittsburgh",
+    "country": "United States",
+    "ezproxy_prefix": "https://pitt.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.pitt.edu",
+    "login_portal": "https://pitt.idm.oclc.org/login"
+  },
+  {
+    "id": "bu",
+    "name": "Boston University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.bu.edu/login?url=",
+    "library_portal": "https://www.bu.edu/library",
+    "login_portal": "https://ezproxy.bu.edu/login"
+  },
+  {
+    "id": "tufts",
+    "name": "Tufts University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.library.tufts.edu/login?url=",
+    "library_portal": "https://library.tufts.edu",
+    "login_portal": "https://ezproxy.library.tufts.edu/login"
+  },
+  {
+    "id": "bc",
+    "name": "Boston College",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.proxy.bc.edu/login?url=",
+    "library_portal": "https://library.bc.edu",
+    "login_portal": "https://login.proxy.bc.edu/login"
+  },
+  {
+    "id": "rochester",
+    "name": "University of Rochester",
+    "country": "United States",
+    "ezproxy_prefix": "https://urldefense.library.rochester.edu/login?url=",
+    "library_portal": "https://www.library.rochester.edu",
+    "login_portal": "https://urldefense.library.rochester.edu/login"
+  },
+  {
+    "id": "cwru",
+    "name": "Case Western Reserve University",
+    "country": "United States",
+    "ezproxy_prefix": "https://case.idm.oclc.org/login?url=",
+    "library_portal": "https://case.edu/libraries",
+    "login_portal": "https://case.idm.oclc.org/login"
+  },
+  {
+    "id": "tulane",
+    "name": "Tulane University",
+    "country": "United States",
+    "ezproxy_prefix": "https://tulane.idm.oclc.org/login?url=",
+    "library_portal": "https://library.tulane.edu",
+    "login_portal": "https://tulane.idm.oclc.org/login"
+  },
+  {
+    "id": "vt",
+    "name": "Virginia Tech",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.ezproxy.lib.vt.edu/login?url=",
+    "library_portal": "https://lib.vt.edu",
+    "login_portal": "https://login.ezproxy.lib.vt.edu/login"
+  },
+  {
+    "id": "colorado",
+    "name": "University of Colorado Boulder",
+    "country": "United States",
+    "ezproxy_prefix": "https://colorado.idm.oclc.org/login?url=",
+    "library_portal": "https://www.colorado.edu/libraries",
+    "login_portal": "https://colorado.idm.oclc.org/login"
+  },
+  {
+    "id": "asu",
+    "name": "Arizona State University",
+    "country": "United States",
+    "ezproxy_prefix": "https://login.ezproxy1.lib.asu.edu/login?url=",
+    "library_portal": "https://lib.asu.edu",
+    "login_portal": "https://login.ezproxy1.lib.asu.edu/login"
+  },
+  {
+    "id": "arizona",
+    "name": "University of Arizona",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.u-library.arizona.edu/login?url=",
+    "library_portal": "https://new.library.arizona.edu",
+    "login_portal": "https://ezproxy.u-library.arizona.edu/login"
+  },
+  {
+    "id": "msu",
+    "name": "Michigan State University",
+    "country": "United States",
+    "ezproxy_prefix": "https://ezproxy.msu.edu/login?url=",
+    "library_portal": "https://lib.msu.edu",
+    "login_portal": "https://ezproxy.msu.edu/login"
+  },
+  {
+    "id": "iowa",
+    "name": "University of Iowa",
+    "country": "United States",
+    "ezproxy_prefix": "https://proxy.lib.uiowa.edu/login?url=",
+    "library_portal": "https://www.lib.uiowa.edu",
+    "login_portal": "https://proxy.lib.uiowa.edu/login"
+  },
+  {
+    "id": "oxford",
+    "name": "University of Oxford",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://oxford.idm.oclc.org/login?url=",
+    "library_portal": "https://www.bodleian.ox.ac.uk",
+    "login_portal": "https://oxford.idm.oclc.org/login"
+  },
+  {
+    "id": "cambridge",
+    "name": "University of Cambridge",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://ezp.lib.cam.ac.uk/login?url=",
+    "library_portal": "https://www.lib.cam.ac.uk",
+    "login_portal": "https://ezp.lib.cam.ac.uk/login"
+  },
+  {
+    "id": "imperial",
+    "name": "Imperial College London",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://spiral.imperial.ac.uk/login?url=",
+    "library_portal": "https://www.imperial.ac.uk/library",
+    "login_portal": "https://spiral.imperial.ac.uk/login"
+  },
+  {
+    "id": "ucl",
+    "name": "University College London",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://ucl.idm.oclc.org/login?url=",
+    "library_portal": "https://www.ucl.ac.uk/library",
+    "login_portal": "https://ucl.idm.oclc.org/login"
+  },
+  {
+    "id": "edinburgh",
+    "name": "University of Edinburgh",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://ezproxy.is.ed.ac.uk/login?url=",
+    "library_portal": "https://www.ed.ac.uk/information-services/library-museum-gallery",
+    "login_portal": "https://ezproxy.is.ed.ac.uk/login"
+  },
+  {
+    "id": "kcl",
+    "name": "King's College London",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://kcl.idm.oclc.org/login?url=",
+    "library_portal": "https://www.kcl.ac.uk/library",
+    "login_portal": "https://kcl.idm.oclc.org/login"
+  },
+  {
+    "id": "manchester",
+    "name": "University of Manchester",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://manchester.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.manchester.ac.uk",
+    "login_portal": "https://manchester.idm.oclc.org/login"
+  },
+  {
+    "id": "bristol",
+    "name": "University of Bristol",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://bristol.idm.oclc.org/login?url=",
+    "library_portal": "https://www.bristol.ac.uk/library",
+    "login_portal": "https://bristol.idm.oclc.org/login"
+  },
+  {
+    "id": "warwick",
+    "name": "University of Warwick",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://warwick.idm.oclc.org/login?url=",
+    "library_portal": "https://warwick.ac.uk/services/library",
+    "login_portal": "https://warwick.idm.oclc.org/login"
+  },
+  {
+    "id": "glasgow",
+    "name": "University of Glasgow",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://ezproxy.lib.gla.ac.uk/login?url=",
+    "library_portal": "https://www.gla.ac.uk/myglasgow/library",
+    "login_portal": "https://ezproxy.lib.gla.ac.uk/login"
+  },
+  {
+    "id": "birmingham",
+    "name": "University of Birmingham",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://bham.idm.oclc.org/login?url=",
+    "library_portal": "https://www.birmingham.ac.uk/facilities/library",
+    "login_portal": "https://bham.idm.oclc.org/login"
+  },
+  {
+    "id": "southampton",
+    "name": "University of Southampton",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://soton.idm.oclc.org/login?url=",
+    "library_portal": "https://www.southampton.ac.uk/library",
+    "login_portal": "https://soton.idm.oclc.org/login"
+  },
+  {
+    "id": "leeds",
+    "name": "University of Leeds",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://leeds.idm.oclc.org/login?url=",
+    "library_portal": "https://library.leeds.ac.uk",
+    "login_portal": "https://leeds.idm.oclc.org/login"
+  },
+  {
+    "id": "sheffield",
+    "name": "University of Sheffield",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://sheffield.idm.oclc.org/login?url=",
+    "library_portal": "https://www.sheffield.ac.uk/library",
+    "login_portal": "https://sheffield.idm.oclc.org/login"
+  },
+  {
+    "id": "lse",
+    "name": "London School of Economics and Political Science",
+    "country": "United Kingdom",
+    "ezproxy_prefix": "https://lse.idm.oclc.org/login?url=",
+    "library_portal": "https://www.lse.ac.uk/library",
+    "login_portal": "https://lse.idm.oclc.org/login"
+  },
+  {
+    "id": "ethz",
+    "name": "ETH Zurich",
+    "country": "Switzerland",
+    "ezproxy_prefix": "https://ezproxy.ethz.ch/login?url=",
+    "library_portal": "https://library.ethz.ch",
+    "login_portal": "https://ezproxy.ethz.ch/login"
+  },
+  {
+    "id": "epfl",
+    "name": "EPFL",
+    "country": "Switzerland",
+    "ezproxy_prefix": "https://epfl.idm.oclc.org/login?url=",
+    "library_portal": "https://www.epfl.ch/campus/services/en/it-services/library",
+    "login_portal": "https://epfl.idm.oclc.org/login"
+  },
+  {
+    "id": "lmu_munich",
+    "name": "LMU Munich",
+    "country": "Germany",
+    "ezproxy_prefix": "https://login.ub.uni-muenchen.de/login?url=",
+    "library_portal": "https://www.ub.uni-muenchen.de",
+    "login_portal": "https://login.ub.uni-muenchen.de/login"
+  },
+  {
+    "id": "tum",
+    "name": "Technical University of Munich",
+    "country": "Germany",
+    "ezproxy_prefix": "https://login.eaccess.ub.tum.de/login?url=",
+    "library_portal": "https://www.ub.tum.de",
+    "login_portal": "https://login.eaccess.ub.tum.de/login"
+  },
+  {
+    "id": "heidelberg",
+    "name": "Heidelberg University",
+    "country": "Germany",
+    "ezproxy_prefix": "https://login.ub.uni-heidelberg.de/login?url=",
+    "library_portal": "https://www.ub.uni-heidelberg.de",
+    "login_portal": "https://login.ub.uni-heidelberg.de/login"
+  },
+  {
+    "id": "karolinska",
+    "name": "Karolinska Institute",
+    "country": "Sweden",
+    "ezproxy_prefix": "https://kib.idm.oclc.org/login?url=",
+    "library_portal": "https://kib.ki.se",
+    "login_portal": "https://kib.idm.oclc.org/login"
+  },
+  {
+    "id": "sorbonne",
+    "name": "Sorbonne University",
+    "country": "France",
+    "ezproxy_prefix": "https://sorbonne.idm.oclc.org/login?url=",
+    "library_portal": "https://sciences.sorbonne-universite.fr/formation-recherche/bibliotheque",
+    "login_portal": "https://sorbonne.idm.oclc.org/login"
+  },
+  {
+    "id": "psl",
+    "name": "PSL Research University",
+    "country": "France",
+    "ezproxy_prefix": "https://psl.idm.oclc.org/login?url=",
+    "library_portal": "https://psl.eu/vie-de-campus/bibliotheques",
+    "login_portal": "https://psl.idm.oclc.org/login"
+  },
+  {
+    "id": "amsterdam",
+    "name": "University of Amsterdam",
+    "country": "Netherlands",
+    "ezproxy_prefix": "https://uva.idm.oclc.org/login?url=",
+    "library_portal": "https://uba.uva.nl",
+    "login_portal": "https://uva.idm.oclc.org/login"
+  },
+  {
+    "id": "leiden",
+    "name": "Leiden University",
+    "country": "Netherlands",
+    "ezproxy_prefix": "https://leiden.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.universiteitleiden.nl",
+    "login_portal": "https://leiden.idm.oclc.org/login"
+  },
+  {
+    "id": "utrecht",
+    "name": "Utrecht University",
+    "country": "Netherlands",
+    "ezproxy_prefix": "https://utrecht.idm.oclc.org/login?url=",
+    "library_portal": "https://www.uu.nl/en/university-library",
+    "login_portal": "https://utrecht.idm.oclc.org/login"
+  },
+  {
+    "id": "kuleuven",
+    "name": "KU Leuven",
+    "country": "Belgium",
+    "ezproxy_prefix": "https://kuleuven.idm.oclc.org/login?url=",
+    "library_portal": "https://bib.kuleuven.be",
+    "login_portal": "https://kuleuven.idm.oclc.org/login"
+  },
+  {
+    "id": "copenhagen",
+    "name": "University of Copenhagen",
+    "country": "Denmark",
+    "ezproxy_prefix": "https://kb.idm.oclc.org/login?url=",
+    "library_portal": "https://kub.kb.dk",
+    "login_portal": "https://kb.idm.oclc.org/login"
+  },
+  {
+    "id": "toronto",
+    "name": "University of Toronto",
+    "country": "Canada",
+    "ezproxy_prefix": "https://myaccess.library.utoronto.ca/login?url=",
+    "library_portal": "https://onesearch.library.utoronto.ca",
+    "login_portal": "https://myaccess.library.utoronto.ca/login"
+  },
+  {
+    "id": "ubc",
+    "name": "University of British Columbia",
+    "country": "Canada",
+    "ezproxy_prefix": "https://ezproxy.library.ubc.ca/login?url=",
+    "library_portal": "https://library.ubc.ca",
+    "login_portal": "https://ezproxy.library.ubc.ca/login"
+  },
+  {
+    "id": "mcgill",
+    "name": "McGill University",
+    "country": "Canada",
+    "ezproxy_prefix": "https://proxy.library.mcgill.ca/login?url=",
+    "library_portal": "https://www.mcgill.ca/library",
+    "login_portal": "https://proxy.library.mcgill.ca/login"
+  },
+  {
+    "id": "mcmaster",
+    "name": "McMaster University",
+    "country": "Canada",
+    "ezproxy_prefix": "https://libaccess.mcmaster.ca/login?url=",
+    "library_portal": "https://library.mcmaster.ca",
+    "login_portal": "https://libaccess.mcmaster.ca/login"
+  },
+  {
+    "id": "montreal",
+    "name": "Université de Montréal",
+    "country": "Canada",
+    "ezproxy_prefix": "https://login.proxy.bib.umontreal.ca/login?url=",
+    "library_portal": "https://bib.umontreal.ca",
+    "login_portal": "https://login.proxy.bib.umontreal.ca/login"
+  },
+  {
+    "id": "alberta",
+    "name": "University of Alberta",
+    "country": "Canada",
+    "ezproxy_prefix": "https://login.ezproxy.library.ualberta.ca/login?url=",
+    "library_portal": "https://www.library.ualberta.ca",
+    "login_portal": "https://login.ezproxy.library.ualberta.ca/login"
+  },
+  {
+    "id": "waterloo",
+    "name": "University of Waterloo",
+    "country": "Canada",
+    "ezproxy_prefix": "https://proxy.lib.uwaterloo.ca/login?url=",
+    "library_portal": "https://uwaterloo.ca/library",
+    "login_portal": "https://proxy.lib.uwaterloo.ca/login"
+  },
+  {
+    "id": "nus",
+    "name": "National University of Singapore",
+    "country": "Singapore",
+    "ezproxy_prefix": "https://libproxy1.nus.edu.sg/login?url=",
+    "library_portal": "https://libportal.nus.edu.sg",
+    "login_portal": "https://libproxy1.nus.edu.sg/login"
+  },
+  {
+    "id": "ntu",
+    "name": "Nanyang Technological University",
+    "country": "Singapore",
+    "ezproxy_prefix": "https://ezproxy.lib.ntu.edu.sg/login?url=",
+    "library_portal": "https://www.ntu.edu.sg/library",
+    "login_portal": "https://ezproxy.lib.ntu.edu.sg/login"
+  },
+  {
+    "id": "tokyo",
+    "name": "University of Tokyo",
+    "country": "Japan",
+    "ezproxy_prefix": "https://gateway.itc.u-tokyo.ac.jp/login?url=",
+    "library_portal": "https://www.lib.u-tokyo.ac.jp",
+    "login_portal": "https://gateway.itc.u-tokyo.ac.jp/login"
+  },
+  {
+    "id": "kyoto",
+    "name": "Kyoto University",
+    "country": "Japan",
+    "ezproxy_prefix": "https://kyoto-u.idm.oclc.org/login?url=",
+    "library_portal": "https://www.kulib.kyoto-u.ac.jp",
+    "login_portal": "https://kyoto-u.idm.oclc.org/login"
+  },
+  {
+    "id": "peking",
+    "name": "Peking University",
+    "country": "China",
+    "ezproxy_prefix": "https://libproxy.pku.edu.cn/login?url=",
+    "library_portal": "https://www.lib.pku.edu.cn",
+    "login_portal": "https://libproxy.pku.edu.cn/login"
+  },
+  {
+    "id": "tsinghua",
+    "name": "Tsinghua University",
+    "country": "China",
+    "ezproxy_prefix": "https://libproxy.tsinghua.edu.cn/login?url=",
+    "library_portal": "https://lib.tsinghua.edu.cn",
+    "login_portal": "https://libproxy.tsinghua.edu.cn/login"
+  },
+  {
+    "id": "hku",
+    "name": "University of Hong Kong",
+    "country": "Hong Kong",
+    "ezproxy_prefix": "https://eproxy.lib.hku.hk/login?url=",
+    "library_portal": "https://lib.hku.hk",
+    "login_portal": "https://eproxy.lib.hku.hk/login"
+  },
+  {
+    "id": "hkust",
+    "name": "Hong Kong University of Science and Technology",
+    "country": "Hong Kong",
+    "ezproxy_prefix": "https://lbdiscover.ust.hk/login?url=",
+    "library_portal": "https://library.hkust.edu.hk",
+    "login_portal": "https://lbdiscover.ust.hk/login"
+  },
+  {
+    "id": "cuhk",
+    "name": "Chinese University of Hong Kong",
+    "country": "Hong Kong",
+    "ezproxy_prefix": "https://easyaccess.lib.cuhk.edu.hk/login?url=",
+    "library_portal": "https://www.lib.cuhk.edu.hk",
+    "login_portal": "https://easyaccess.lib.cuhk.edu.hk/login"
+  },
+  {
+    "id": "snu",
+    "name": "Seoul National University",
+    "country": "South Korea",
+    "ezproxy_prefix": "https://libproxy.snu.ac.kr/login?url=",
+    "library_portal": "https://library.snu.ac.kr",
+    "login_portal": "https://libproxy.snu.ac.kr/login"
+  },
+  {
+    "id": "kaist",
+    "name": "KAIST",
+    "country": "South Korea",
+    "ezproxy_prefix": "https://kaist.idm.oclc.org/login?url=",
+    "library_portal": "https://library.kaist.ac.kr",
+    "login_portal": "https://kaist.idm.oclc.org/login"
+  },
+  {
+    "id": "melbourne",
+    "name": "University of Melbourne",
+    "country": "Australia",
+    "ezproxy_prefix": "https://ezp.lib.unimelb.edu.au/login?url=",
+    "library_portal": "https://library.unimelb.edu.au",
+    "login_portal": "https://ezp.lib.unimelb.edu.au/login"
+  },
+  {
+    "id": "sydney",
+    "name": "University of Sydney",
+    "country": "Australia",
+    "ezproxy_prefix": "https://ezproxy.library.sydney.edu.au/login?url=",
+    "library_portal": "https://library.sydney.edu.au",
+    "login_portal": "https://ezproxy.library.sydney.edu.au/login"
+  },
+  {
+    "id": "unsw",
+    "name": "UNSW Sydney",
+    "country": "Australia",
+    "ezproxy_prefix": "https://unsw.idm.oclc.org/login?url=",
+    "library_portal": "https://www.library.unsw.edu.au",
+    "login_portal": "https://unsw.idm.oclc.org/login"
+  },
+  {
+    "id": "anu",
+    "name": "Australian National University",
+    "country": "Australia",
+    "ezproxy_prefix": "https://anu.idm.oclc.org/login?url=",
+    "library_portal": "https://anulib.anu.edu.au",
+    "login_portal": "https://anu.idm.oclc.org/login"
+  },
+  {
+    "id": "uq",
+    "name": "University of Queensland",
+    "country": "Australia",
+    "ezproxy_prefix": "https://ezproxy.library.uq.edu.au/login?url=",
+    "library_portal": "https://www.library.uq.edu.au",
+    "login_portal": "https://ezproxy.library.uq.edu.au/login"
+  },
+  {
+    "id": "monash",
+    "name": "Monash University",
+    "country": "Australia",
+    "ezproxy_prefix": "https://ezproxy.lib.monash.edu.au/login?url=",
+    "library_portal": "https://www.monash.edu/library",
+    "login_portal": "https://ezproxy.lib.monash.edu.au/login"
+  }
+]
