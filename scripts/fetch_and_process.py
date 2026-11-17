@@ -242,6 +242,42 @@ def find_paper_in_catalogue(doi):
     return None
 
 
+def check_local_downloads(pii=None, safe_name=None):
+    """Check common local download intake directories for matching paper PDFs."""
+    user_downloads = Path.home() / "Downloads"
+    if not user_downloads.is_dir():
+        return None
+
+    candidates = []
+    if pii:
+        candidates.extend([
+            user_downloads / f"PII{pii}.pdf",
+            user_downloads / f"PII_{pii}.pdf",
+            user_downloads / f"1-s2.0-{pii}-main.pdf",
+            user_downloads / f"{pii}.pdf",
+        ])
+    if safe_name:
+        candidates.extend([
+            user_downloads / f"{safe_name}.pdf",
+            user_downloads / f"{safe_name.replace(':', '_')}.pdf",
+        ])
+
+    for cand in candidates:
+        if cand.is_file() and cand.stat().st_size > 10000:
+            rep, _ = source_files.inspect_file(cand, expected="pdf")
+            if rep.get("mechanical_status") == "pass":
+                return cand
+
+    if pii:
+        for f in user_downloads.glob(f"*{pii}*.pdf"):
+            if f.is_file() and f.stat().st_size > 10000:
+                rep, _ = source_files.inspect_file(f, expected="pdf")
+                if rep.get("mechanical_status") == "pass":
+                    return f
+
+    return None
+
+
 def step_a_download_paper(doi, institution, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True):
     """Step A: Download raw paper PDF using authenticated institutional session."""
     clean_doi = normalize_doi(doi)
@@ -250,11 +286,21 @@ def step_a_download_paper(doi, institution, state_path=None, output_dir=None, di
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / f"{safe_name}.pdf"
 
-    # Check if already present and valid
+    # Check if already present and valid in downloads/
     if pdf_path.is_file() and pdf_path.stat().st_size > 10000:
         inspect_report, _ = source_files.inspect_file(pdf_path, expected="pdf")
         if inspect_report.get("mechanical_status") == "pass":
             print(f"✓ Valid PDF already exists at {pdf_path} ({pdf_path.stat().st_size:,} bytes).")
+            return pdf_path, inspect_report
+
+    # Check local user intake (~/Downloads)
+    local_intake = check_local_downloads(pii=pii, safe_name=safe_name)
+    if local_intake:
+        print(f"✓ Detected matching publisher PDF in user downloads: {local_intake.name} ({local_intake.stat().st_size:,} bytes)")
+        shutil.copy2(local_intake, pdf_path)
+        inspect_report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+        if inspect_report.get("mechanical_status") == "pass":
+            print(f"✓ Verified and imported publisher PDF to {pdf_path}")
             return pdf_path, inspect_report
 
     session_file = auth_setup.get_existing_state_path(state_path)
@@ -357,10 +403,11 @@ def step_a_download_paper(doi, institution, state_path=None, output_dir=None, di
                 ]
 
                 # Check on-page View PDF button / tokenized link
-                view_pdf_btn = page.query_selector('a:has-text("View PDF"), a.link-button:has-text("PDF"), a[aria-label*="PDF"], a[href*="pdfft"], a[href*="/pdf"]')
+                view_pdf_btn = page.query_selector('a:has-text("View PDF"), a.link-button:has-text("PDF"), a[aria-label*="View PDF"], a[href*="pdfft"], a[href*="/pdf"]')
                 if view_pdf_btn:
                     token_href = view_pdf_btn.get_attribute("href")
                     if token_href:
+                        print(f"Discovered on-page View PDF hyperlink: {token_href}")
                         full_token_url = token_href if token_href.startswith("http") else page.url.split("/science/")[0] + token_href
                         pii_endpoints.insert(0, full_token_url)
                         pii_endpoints.insert(1, full_token_url.replace("/pdfft?", "/pdf?"))
@@ -377,6 +424,13 @@ def step_a_download_paper(doi, institution, state_path=None, output_dir=None, di
                                 break
                     except Exception as e:
                         print(f"  PII probe note: {e}")
+
+                # If direct endpoint probe was blocked by Cloudflare/Craft JS challenge, check user download intake
+                if not pdf_bytes:
+                    local_cand = check_local_downloads(pii=sd_pii, safe_name=safe_name)
+                    if local_cand:
+                        print(f"✓ Retrieved publisher PDF from user intake: {local_cand.name} ({local_cand.stat().st_size:,} bytes)")
+                        pdf_bytes = local_cand.read_bytes()
 
             # 2. Check response interception or viewer frames
             if not pdf_bytes and intercepted_pdfs:
@@ -856,6 +910,8 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
             metadata.setdefault("start_page", resolved.get("start_page"))
             metadata.setdefault("end_page", resolved.get("end_page"))
             metadata.setdefault("url", resolved.get("url"))
+            if resolved.get("pii"):
+                metadata.setdefault("pii", resolved.get("pii"))
 
     metadata["doi"] = target_doi
     metadata.setdefault("title", f"Paper {target_doi}")
