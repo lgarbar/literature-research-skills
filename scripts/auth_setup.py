@@ -175,17 +175,45 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
         except Exception as e:
             print(f"Navigation note: {e}")
 
-        if not headless and sys.stdin.isatty():
+        if not headless:
             print("\n👉 Please complete your institutional login and MFA in the browser window.")
-            print("   Press [ENTER] in this terminal once you have successfully signed in...")
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                print("\nLogin cancelled.")
-                browser.close()
-                return False
+            print("   (The session will save automatically once login completes, or you can press [ENTER] when done)")
+
+            start_time = time.time()
+            initial_url = page.url
+            while time.time() - start_time < timeout_sec:
+                try:
+                    if page.is_closed() or not browser.is_connected():
+                        print("Browser window closed.")
+                        break
+
+                    current_url = page.url
+                    cookies = context.cookies()
+                    
+                    # Detect if user has successfully navigated through SSO/SAML
+                    is_sso = any(auth_host in current_url.lower() for auth_host in ["onevu.", "okta.com", "duo.", "shibboleth", "/saml", "/sso"])
+                    has_auth_cookies = any("ezp" in c["name"].lower() or "proxy" in c["name"].lower() or "session" in c["name"].lower() for c in cookies)
+                    
+                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or "vanderbilt" in current_url):
+                        print(f"\n✓ Detected authenticated destination: {current_url}")
+                        page.wait_for_timeout(2000)
+                        break
+
+                    # Check for terminal ENTER key without blocking
+                    try:
+                        import select
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            sys.stdin.readline()
+                            print("\nConfirmation received from terminal.")
+                            break
+                    except Exception:
+                        pass
+
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    break
         else:
-            print("Non-interactive / headless mode: Waiting for page to settle...")
+            print("Headless mode: Waiting for page to settle...")
             page.wait_for_timeout(5000)
 
         # Save session cookies and storage state
