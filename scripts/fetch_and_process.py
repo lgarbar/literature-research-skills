@@ -162,6 +162,57 @@ def build_ris_string(metadata):
     return "\n".join(lines)
 
 
+def resolve_doi_metadata(doi):
+    """Attempt public bibliographic resolution via Crossref / OpenAlex."""
+    clean = normalize_doi(doi)
+    try:
+        import httpx
+        url = f"https://api.crossref.org/works/{clean}"
+        resp = httpx.get(url, timeout=12, headers={"User-Agent": "literature-research-skills/1.0 (mailto:agent@local.internal)"})
+        if resp.status_code == 200:
+            msg = resp.json().get("message", {})
+            title = msg.get("title", [""])[0] if isinstance(msg.get("title"), list) and msg.get("title") else str(msg.get("title", ""))
+            venue = msg.get("container-title", [""])[0] if isinstance(msg.get("container-title"), list) and msg.get("container-title") else str(msg.get("container-title", ""))
+
+            authors = []
+            for a in msg.get("author", []):
+                family = a.get("family", "")
+                given = a.get("given", "")
+                if family:
+                    authors.append(f"{family}, {given}".strip(", "))
+                elif a.get("name"):
+                    authors.append(a.get("name"))
+
+            year = ""
+            date_parts = msg.get("issued", {}).get("date-parts", [[]])[0]
+            if date_parts:
+                year = str(date_parts[0])
+
+            page_str = msg.get("page", "")
+            start_page, end_page = "", ""
+            if "-" in page_str:
+                parts = page_str.split("-", 1)
+                start_page, end_page = parts[0].strip(), parts[1].strip()
+            elif page_str:
+                start_page = page_str.strip()
+
+            return {
+                "doi": clean,
+                "title": title or f"Paper {clean}",
+                "authors": authors,
+                "year": year,
+                "venue": venue,
+                "volume": str(msg.get("volume", "")),
+                "issue": str(msg.get("issue", "")),
+                "start_page": start_page,
+                "end_page": end_page,
+                "url": f"https://doi.org/{clean}",
+            }
+    except Exception as e:
+        pass
+    return None
+
+
 def find_paper_in_catalogue(doi):
     """Look up paper metadata in local catalogue if present."""
     papers_path = ROOT / "search-records" / "papers.jsonl"
@@ -281,7 +332,36 @@ def step_a_download_paper(doi, institution, state_path=None, output_dir=None, di
                             except Exception as e:
                                 print(f"  Iframe fetch note: {e}")
 
-            # Check for standard PDF download buttons/links
+            # Check for candidate PDF links on the page (HighWire, Silverchair, Wiley, Springer, etc.)
+            if not pdf_bytes:
+                try:
+                    links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
+                    # Prioritize full text PDF links
+                    sorted_links = sorted(
+                        [l for l in links if l and l.startswith("http")],
+                        key=lambda x: (
+                            0 if ".full.pdf" in x.lower() else
+                            1 if "pdfdirect" in x.lower() else
+                            2 if x.lower().endswith(".pdf") else
+                            3 if "/pdf/" in x.lower() else 4
+                        )
+                    )
+                    for href in sorted_links:
+                        print(f"Testing candidate PDF link: {href[:80]}...")
+                        try:
+                            resp = context.request.get(href, timeout=30000)
+                            if resp.status == 200:
+                                body = resp.body()
+                                if body.startswith(b"%PDF-") and len(body) > 10000:
+                                    print(f"✓ Downloaded PDF via link ({len(body):,} bytes).")
+                                    pdf_bytes = body
+                                    break
+                        except Exception as e:
+                            print(f"  Link probe note: {e}")
+                except Exception as e:
+                    print(f"  Link evaluation note: {e}")
+
+            # Check for standard PDF download buttons/links with browser download event
             if not pdf_bytes:
                 download_selectors = [
                     "a[data-article-pdf='true']",
@@ -622,6 +702,18 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
         metadata.setdefault("start_page", cat_paper.get("start_page"))
         metadata.setdefault("end_page", cat_paper.get("end_page"))
         metadata.setdefault("id", cat_paper.get("paper_id"))
+    elif not ris_record:
+        resolved = resolve_doi_metadata(target_doi)
+        if resolved:
+            metadata.setdefault("title", resolved.get("title"))
+            metadata.setdefault("authors", resolved.get("authors"))
+            metadata.setdefault("year", resolved.get("year"))
+            metadata.setdefault("venue", resolved.get("venue"))
+            metadata.setdefault("volume", resolved.get("volume"))
+            metadata.setdefault("issue", resolved.get("issue"))
+            metadata.setdefault("start_page", resolved.get("start_page"))
+            metadata.setdefault("end_page", resolved.get("end_page"))
+            metadata.setdefault("url", resolved.get("url"))
 
     metadata["doi"] = target_doi
     metadata.setdefault("title", f"Paper {target_doi}")
