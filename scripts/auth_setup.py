@@ -20,6 +20,7 @@ UNIVERSITIES_FILE = ROOT / "config" / "universities.json"
 ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_PATH = ROOT / "state" / "storage_state.json"
 COMPAT_STATE_PATH = ROOT / "institutional_auth.json"
+DEFAULT_PROFILE_DIR = ROOT / "state" / "chromium_profile"
 
 DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 STEALTH_BROWSER_ARGS = [
@@ -242,8 +243,12 @@ def get_existing_state_path(custom_path=None):
     return None
 
 
-def authenticate_interactive(institution=None, target_url=None, state_path=None, headless=False, timeout_sec=300):
-    """Launch Playwright browser for user authentication and save storage state."""
+def authenticate_interactive(institution=None, target_url=None, state_path=None, headless=False, timeout_sec=300, profile_dir=None):
+    """Launch Playwright browser for user authentication and save storage state.
+
+    Uses Playwright's persistent context pointing to state/chromium_profile/ to preserve
+    session cookies and Duo authentication states across runs.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -253,6 +258,8 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     inst = institution or get_active_institution()
     save_path = Path(state_path or DEFAULT_STATE_PATH).resolve()
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    p_dir = Path(profile_dir or os.environ.get("CHROMIUM_PROFILE_DIR") or DEFAULT_PROFILE_DIR).resolve()
+    p_dir.mkdir(parents=True, exist_ok=True)
 
     destination_url = target_url or inst.get("login_portal") or inst.get("library_portal")
     if target_url and not target_url.startswith(inst.get("ezproxy_prefix", "")):
@@ -266,6 +273,7 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     print(f"Library Portal:     {inst.get('library_portal')}")
     print(f"Login Destination:  {destination_url}")
     print(f"Session Save Path:  {save_path}")
+    print(f"Profile Directory:  {p_dir}")
     print("-" * 70)
 
     if not headless:
@@ -273,25 +281,59 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
         print("   (The session will save automatically once login completes, or you can press [ENTER] when done)\n")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=list(STEALTH_BROWSER_ARGS)
-        )
-        context_kwargs = {}
+        context = None
+        browser = None
         existing_state = get_existing_state_path(state_path)
-        if existing_state:
+
+        if hasattr(p.chromium, "launch_persistent_context"):
             try:
-                context_kwargs["storage_state"] = str(existing_state)
-                print(f"Loaded existing session state from {existing_state.name}.")
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=str(p_dir),
+                    headless=headless,
+                    args=list(STEALTH_BROWSER_ARGS),
+                    user_agent=DEFAULT_DESKTOP_USER_AGENT,
+                    accept_downloads=True,
+                )
+            except Exception as e:
+                print(f"  Note launching persistent context: {e}")
+
+        if context is None:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=list(STEALTH_BROWSER_ARGS)
+            )
+            context_kwargs = {}
+            if existing_state:
+                try:
+                    context_kwargs["storage_state"] = str(existing_state)
+                    print(f"Loaded existing session state from {existing_state.name}.")
+                except Exception:
+                    pass
+
+            context = browser.new_context(
+                **context_kwargs,
+                user_agent=DEFAULT_DESKTOP_USER_AGENT
+            )
+
+        # Inject existing state cookies explicitly into context cookie store
+        if existing_state and hasattr(context, "add_cookies"):
+            try:
+                with open(existing_state, "r", encoding="utf-8") as f:
+                    s_data = json.load(f)
+                    c_list = s_data.get("cookies", [])
+                    if c_list:
+                        cleaned = []
+                        for c in c_list:
+                            c_copy = dict(c)
+                            if c_copy.get("sameSite") not in ("Strict", "Lax", "None"):
+                                c_copy.pop("sameSite", None)
+                            cleaned.append(c_copy)
+                        context.add_cookies(cleaned)
             except Exception:
                 pass
 
-        context = browser.new_context(
-            **context_kwargs,
-            user_agent=DEFAULT_DESKTOP_USER_AGENT
-        )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page = context.new_page()
+        page = context.pages[0] if (hasattr(context, "pages") and context.pages) else context.new_page()
 
         print(f"Opening browser to: {destination_url}")
         try:
@@ -304,7 +346,7 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
             initial_url = page.url
             while time.time() - start_time < timeout_sec:
                 try:
-                    if page.is_closed() or not browser.is_connected():
+                    if page.is_closed() or (browser and not browser.is_connected()):
                         print("Browser window closed.")
                         break
 
@@ -344,7 +386,10 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
         except Exception:
             pass
 
-        browser.close()
+        if browser:
+            browser.close()
+        elif context:
+            context.close()
 
     print(f"\n✓ Institutional authentication state successfully saved to:")
     print(f"  • {save_path}")
@@ -401,6 +446,22 @@ def validate_session(state_path=None, institution=None, test_url=None, interacti
                 storage_state=str(session_file),
                 user_agent=DEFAULT_DESKTOP_USER_AGENT
             )
+            # Inject session cookies explicitly into context cookie store
+            if hasattr(context, "add_cookies"):
+                try:
+                    with open(session_file, "r", encoding="utf-8") as f:
+                        s_data = json.load(f)
+                        c_list = s_data.get("cookies", [])
+                        if c_list:
+                            cleaned = []
+                            for c in c_list:
+                                c_copy = dict(c)
+                                if c_copy.get("sameSite") not in ("Strict", "Lax", "None"):
+                                    c_copy.pop("sameSite", None)
+                                cleaned.append(c_copy)
+                            context.add_cookies(cleaned)
+                except Exception:
+                    pass
             page = context.new_page()
             try:
                 page.goto(check_url, timeout=timeout_sec * 1000, wait_until="domcontentloaded")

@@ -112,8 +112,50 @@ STEALTH_BROWSER_ARGS = [
     "--disable-infobars",
     "--disable-dev-shm-usage"
 ]
+DEFAULT_PROFILE_DIR = ROOT / "state" / "chromium_profile"
 
 ANTI_BOT_PROMPT = "Automated retrieval blocked by anti-bot challenge. Please complete the challenge or download the PDF manually in the browser, then press Enter to resume..."
+MANUAL_DROPIN_PROMPT = "Please download the PDF manually in your regular browser, save it as {doi_filename}.pdf inside your downloads/ folder, and press Enter."
+
+
+def get_storage_state_cookies(session_file=None):
+    """Load cookies from storage state JSON file."""
+    s_file = session_file or auth_setup.get_existing_state_path()
+    if s_file and Path(s_file).is_file():
+        try:
+            with open(s_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("cookies", [])
+        except Exception as e:
+            print(f"  Note loading cookies from {Path(s_file).name}: {e}")
+    return []
+
+
+def inject_storage_state_cookies(context, session_file=None):
+    """Explicitly inject saved cookies from storage_state.json into the Playwright context cookie store."""
+    cookies = get_storage_state_cookies(session_file)
+    if cookies and hasattr(context, "add_cookies"):
+        try:
+            cleaned_cookies = []
+            for c in cookies:
+                c_copy = dict(c)
+                if c_copy.get("sameSite") not in ("Strict", "Lax", "None"):
+                    c_copy.pop("sameSite", None)
+                cleaned_cookies.append(c_copy)
+            context.add_cookies(cleaned_cookies)
+        except Exception as e:
+            print(f"  Note injecting cookies into browser context: {e}")
+    return cookies
+
+
+def get_cookie_header_string(session_file=None):
+    """Format cookies from storage_state.json as an HTTP Cookie header string."""
+    cookies = get_storage_state_cookies(session_file)
+    cookie_parts = []
+    for c in cookies:
+        if "name" in c and "value" in c:
+            cookie_parts.append(f"{c['name']}={c['value']}")
+    return "; ".join(cookie_parts) if cookie_parts else ""
 
 
 def log_failure(doi, failure_stage, error, endpoint_url=None, working_dir=None):
@@ -863,8 +905,8 @@ def download_oa_via_unauthenticated_browser(candidate_urls, pdf_path, headless=T
         return False
 
 
-def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pii=None, safe_name=None, institution=None):
-    """Fallback for single-DOI mode: open publisher page in visible browser window for manual/challenge resolution."""
+def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pii=None, safe_name=None, institution=None, profile_dir=None):
+    """Fallback for single-DOI mode: open publisher page in visible browser window for manual/challenge resolution with persistent context."""
     print("\n" + "=" * 70)
     print(" 🖥️  Activating Interactive Headed Fallback (Single-DOI Mode)")
     print(f" Target: {target_url}")
@@ -885,26 +927,56 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
     download_dir.mkdir(parents=True, exist_ok=True)
     html_fallback_detected = False
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-infobars",
-                "--disable-dev-shm-usage"
-            ]
-        )
-        context_kwargs = {
-            "accept_downloads": True,
-            "user_agent": DEFAULT_DESKTOP_USER_AGENT,
-        }
-        if s_file and Path(s_file).is_file():
-            context_kwargs["storage_state"] = str(s_file)
+    p_dir = Path(profile_dir or os.environ.get("CHROMIUM_PROFILE_DIR") or DEFAULT_PROFILE_DIR).resolve()
+    p_dir.mkdir(parents=True, exist_ok=True)
 
-        context = browser.new_context(**context_kwargs)
+    with sync_playwright() as p:
+        context = None
+        browser = None
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--disable-dev-shm-usage"
+        ]
+
+        if hasattr(p.chromium, "launch_persistent_context"):
+            try:
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=str(p_dir),
+                    headless=False,
+                    args=launch_args,
+                    user_agent=DEFAULT_DESKTOP_USER_AGENT,
+                    accept_downloads=True,
+                )
+            except Exception as e:
+                print(f"  Note launching persistent context: {e}")
+
+        if context is None:
+            browser = p.chromium.launch(
+                headless=False,
+                args=launch_args
+            )
+            context_kwargs = {
+                "accept_downloads": True,
+                "user_agent": DEFAULT_DESKTOP_USER_AGENT,
+            }
+            if s_file and Path(s_file).is_file():
+                context_kwargs["storage_state"] = str(s_file)
+
+            context = browser.new_context(**context_kwargs)
+
+        # Inject saved cookies from storage_state.json explicitly into cookie store and request headers
+        inject_storage_state_cookies(context, s_file)
+        cookie_header = get_cookie_header_string(s_file)
+        if cookie_header:
+            try:
+                context.set_extra_http_headers({"Cookie": cookie_header})
+            except Exception:
+                pass
+
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        page = context.new_page()
+        page = context.pages[0] if (hasattr(context, "pages") and context.pages) else context.new_page()
 
         # Listen for downloads triggered by user clicks in headed browser
         def on_browser_download(download):
@@ -942,8 +1014,9 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
             try:
                 # 1. Check if current browser page is already displaying a PDF stream
                 content_type = page.evaluate("() => document.contentType")
-                if content_type == "application/pdf":
-                    resp = context.request.get(page.url, timeout=20000)
+                page_u = page.url if isinstance(getattr(page, "url", None), str) else ""
+                if content_type == "application/pdf" and page_u:
+                    resp = context.request.get(page_u, timeout=20000)
                     if resp.status == 200 and is_valid_pdf_stream(resp.body()):
                         pdf_path.write_bytes(resp.body())
             except Exception:
@@ -952,8 +1025,9 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
         if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path)):
             # 2. If ScienceDirect, try navigating directly to pdfft download endpoint
             resolved_pii = pii
-            if not resolved_pii:
-                pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', page.url, re.I)
+            page_u = page.url if isinstance(getattr(page, "url", None), str) else ""
+            if not resolved_pii and page_u:
+                pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page_u, re.I) or re.search(r'/pii/([A-Z0-9]+)', page_u, re.I)
                 if pii_m:
                     resolved_pii = pii_m.group(1)
             if resolved_pii:
@@ -991,47 +1065,75 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
             except Exception:
                 pass
 
-        browser.close()
+        if browser:
+            browser.close()
+        elif context:
+            context.close()
 
-    # Once the user confirms, verify the downloaded PDF in downloads/
-    # 1. Check if direct pdf_path is valid
-    if pdf_path.is_file():
-        if is_valid_pdf_stream(pdf_path):
-            report, _ = source_files.inspect_file(pdf_path, expected="pdf")
-            if report.get("mechanical_status") == "pass":
-                print(f"✓ Verified downloaded PDF in {pdf_path.name} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
-                return pdf_path, report
-        else:
-            try:
-                b = pdf_path.read_bytes()
-                if b"<html" in b[:500].lower() or b"<!doctype html" in b[:500].lower():
-                    html_fallback_detected = True
-            except Exception:
-                pass
-            pdf_path.unlink(missing_ok=True)
+    def check_for_valid_pdf():
+        # 1. Check direct pdf_path
+        if pdf_path.is_file():
+            if is_valid_pdf_stream(pdf_path):
+                rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
+                if rep.get("mechanical_status") == "pass":
+                    return pdf_path, rep
+            else:
+                try:
+                    b = pdf_path.read_bytes()
+                    if b"<html" in b[:500].lower() or b"<!doctype html" in b[:500].lower():
+                        nonlocal html_fallback_detected
+                        html_fallback_detected = True
+                except Exception:
+                    pass
+                pdf_path.unlink(missing_ok=True)
 
-    # 2. Check local user intake (~/Downloads)
-    local_intake = check_local_downloads(pii=pii, safe_name=s_name)
-    if local_intake and is_valid_pdf_stream(local_intake):
-        print(f"✓ Detected matching publisher PDF in user downloads: {local_intake.name} ({local_intake.stat().st_size:,} bytes)")
-        shutil.copy2(local_intake, pdf_path)
-        report, _ = source_files.inspect_file(pdf_path, expected="pdf")
-        if report.get("mechanical_status") == "pass":
-            print(f"✓ Verified and imported publisher PDF to {pdf_path}")
-            return pdf_path, report
-        else:
-            pdf_path.unlink(missing_ok=True)
-
-    # 3. Check for any freshly created valid PDF in download_dir
-    for cand in sorted(download_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True):
-        if cand != pdf_path and cand.is_file() and is_valid_pdf_stream(cand):
-            shutil.copy2(cand, pdf_path)
-            report, _ = source_files.inspect_file(pdf_path, expected="pdf")
-            if report.get("mechanical_status") == "pass":
-                print(f"✓ Imported valid PDF from {cand.name} to {pdf_path}")
-                return pdf_path, report
+        # 2. Check local user intake (~/Downloads)
+        local_intake = check_local_downloads(pii=pii, safe_name=s_name)
+        if local_intake and is_valid_pdf_stream(local_intake):
+            print(f"✓ Detected matching publisher PDF in user downloads: {local_intake.name} ({local_intake.stat().st_size:,} bytes)")
+            shutil.copy2(local_intake, pdf_path)
+            rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            if rep.get("mechanical_status") == "pass":
+                return pdf_path, rep
             else:
                 pdf_path.unlink(missing_ok=True)
+
+        # 3. Check for any freshly created valid PDF in download_dir
+        for cand in sorted(download_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if cand != pdf_path and cand.is_file() and is_valid_pdf_stream(cand):
+                shutil.copy2(cand, pdf_path)
+                rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
+                if rep.get("mechanical_status") == "pass":
+                    return pdf_path, rep
+                else:
+                    pdf_path.unlink(missing_ok=True)
+
+        return None, None
+
+    # Initial check after interactive browser session
+    found_pdf, report = check_for_valid_pdf()
+    if found_pdf and report:
+        print(f"✓ Verified downloaded PDF in {found_pdf.name} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
+        return found_pdf, report
+
+    # 2. Graceful Manual Drop-in Fallback:
+    # If the interactive fallback still encounters a publisher block, display a clear terminal instruction telling the user:
+    # "Please download the PDF manually in your regular browser, save it as {doi_filename}.pdf inside your downloads/ folder, and press Enter."
+    manual_instruction = MANUAL_DROPIN_PROMPT.format(doi_filename=s_name)
+    print("\n" + "!" * 70)
+    print(" ⚠️  Publisher block persists after browser session.")
+    print(f" {manual_instruction}")
+    print("!" * 70)
+    try:
+        input(f"\n{manual_instruction}\n")
+    except (EOFError, KeyboardInterrupt):
+        print("\nResuming pipeline...")
+
+    # Re-check downloads/ after user manual drop-in confirmation
+    found_pdf, report = check_for_valid_pdf()
+    if found_pdf and report:
+        print(f"✓ Detected and verified manually placed PDF in {found_pdf.name} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
+        return found_pdf, report
 
     if html_fallback_detected:
         err = InvalidPDFError(
@@ -1168,6 +1270,14 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                         accept_downloads=True,
                         user_agent=DEFAULT_DESKTOP_USER_AGENT,
                     )
+                    # Explicit session cookie injection into cookie store and request headers
+                    inject_storage_state_cookies(context, session_file)
+                    cookie_header = get_cookie_header_string(session_file)
+                    if cookie_header:
+                        try:
+                            context.set_extra_http_headers({"Cookie": cookie_header})
+                        except Exception:
+                            pass
                     context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                     page = context.new_page()
 
