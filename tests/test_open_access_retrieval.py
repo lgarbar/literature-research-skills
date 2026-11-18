@@ -135,7 +135,7 @@ class TestOpenAccessRetrieval(unittest.TestCase):
         # Mock successful download
         def write_fake_pdf(urls, path):
             # Minimal valid PDF header and body
-            path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"A" * 15000)
+            path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"A" * 150000)
             return True
 
         mock_http.side_effect = write_fake_pdf
@@ -143,7 +143,7 @@ class TestOpenAccessRetrieval(unittest.TestCase):
         # Make sure no session file exists
         with patch("auth_setup.get_existing_state_path", return_value=None):
             with patch("fetch_and_process.source_files.inspect_file") as mock_inspect:
-                mock_inspect.return_value = ({"mechanical_status": "pass", "bytes": 15050, "page_count": 5}, "")
+                mock_inspect.return_value = ({"mechanical_status": "pass", "bytes": 150050, "page_count": 5}, "")
                 pdf_path, rep = fetch_and_process.step_a_download_paper(
                     doi=doi,
                     institution={"id": "vanderbilt", "name": "Vanderbilt University", "ezproxy_prefix": "https://proxy..."},
@@ -171,9 +171,9 @@ class TestOpenAccessRetrieval(unittest.TestCase):
         doi = "10.1371/journal.pone.0210000"
         fake_pdf = self.output_dir / "10.1371_journal.pone.0210000.pdf"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        fake_pdf.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 15000)
+        fake_pdf.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 150000)
 
-        mock_step_a.return_value = (fake_pdf, {"mechanical_status": "pass", "bytes": 15050, "page_count": 6})
+        mock_step_a.return_value = (fake_pdf, {"mechanical_status": "pass", "bytes": 150050, "page_count": 6})
 
         with patch("fetch_and_process.resolve_doi_metadata") as mock_meta:
             mock_meta.return_value = {
@@ -236,7 +236,7 @@ class TestOpenAccessRetrieval(unittest.TestCase):
         fake_md = self.source_text_dir / "paper.md"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.source_text_dir.mkdir(parents=True, exist_ok=True)
-        fake_pdf.write_bytes(b"%PDF-1.4\n" + b"X" * 1000)
+        fake_pdf.write_bytes(b"%PDF-1.4\n" + b"X" * 150000)
         fake_md.write_text("# Title\n\nContent", encoding="utf-8")
 
         mock_zot_instance = MagicMock()

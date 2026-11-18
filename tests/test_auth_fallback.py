@@ -159,13 +159,13 @@ class TestAuthFallback(unittest.TestCase):
                                 resp.url = url
                                 resp.status = 200
                                 resp.headers = {"content-type": "application/pdf"}
-                                resp.body.return_value = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 15000
+                                resp.body.return_value = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 150000
                                 return resp
 
                             mock_context.request.get.side_effect = fake_request_get
 
                             with patch("fetch_and_process.source_files.inspect_file") as mock_inspect:
-                                mock_inspect.return_value = ({"mechanical_status": "pass", "bytes": 15050, "page_count": 8}, "")
+                                mock_inspect.return_value = ({"mechanical_status": "pass", "bytes": 150050, "page_count": 8}, "")
 
                                 captured_out = io.StringIO()
                                 with patch("sys.stdout", captured_out):
