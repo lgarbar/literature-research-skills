@@ -696,9 +696,12 @@ def download_oa_via_unauthenticated_browser(candidate_urls, pdf_path, headless=T
 
 def step_a_download_paper(doi, institution=None, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True, skip_oa=False):
     """Step A: Download raw paper PDF using Open-Access direct fetch or authenticated institutional session."""
+    auth_setup.load_env_vars()
     clean_doi = normalize_doi(doi)
     safe_name = doi_to_filename(clean_doi)
-    out_dir = Path(output_dir or ROOT / "downloads").resolve()
+    default_dir = os.environ.get("PAPER_DOWNLOAD_DIR") or "downloads"
+    target_out = output_dir or (Path(default_dir).expanduser() if Path(default_dir).is_absolute() else ROOT / default_dir)
+    out_dir = Path(target_out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / f"{safe_name}.pdf"
 
@@ -1130,11 +1133,48 @@ conversion_tool: "{tool_used}"
     return markdown_path
 
 
-def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=None):
+def resolve_zotero_collection_key(zot, collection_name):
+    """Retrieve collection key by name or create a new collection if not found."""
+    if not collection_name or not zot:
+        return None
+    target_norm = collection_name.strip().lower()
+    try:
+        cols = []
+        if hasattr(zot, "all_collections"):
+            try:
+                cols = zot.all_collections()
+            except Exception:
+                cols = zot.collections()
+        else:
+            cols = zot.collections()
+
+        if isinstance(cols, list):
+            for col in cols:
+                data = col.get("data", {}) if isinstance(col, dict) else {}
+                name = data.get("name", "")
+                if name.strip().lower() == target_norm:
+                    return data.get("key") or col.get("key")
+
+        # If not found, attempt to create it
+        print(f"Collection '{collection_name}' not found; creating in Zotero library...")
+        created = zot.create_collections([{"name": collection_name.strip()}])
+        if created and isinstance(created, dict) and created.get("successful"):
+            first_success = list(created["successful"].values())[0]
+            key = first_success.get("key")
+            if key:
+                print(f"✓ Created Zotero collection '{collection_name}' (Key: {key}).")
+                return key
+    except Exception as e:
+        print(f"  Note on Zotero collection resolution ({collection_name}): {e}")
+    return None
+
+
+def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=None, collection_name=None):
     """Step C: Sync to Zotero API if credentials exist, or export verified Zotero intake package."""
     auth_setup.load_env_vars()
     api_key = os.environ.get("ZOTERO_API_KEY")
     user_id = os.environ.get("ZOTERO_USER_ID") or os.environ.get("ZOTERO_LIBRARY_ID")
+    target_collection_name = collection_name or os.environ.get("ZOTERO_COLLECTION_NAME") or "New"
 
     clean_doi = normalize_doi(metadata.get("doi", ""))
     safe_name = doi_to_filename(clean_doi) if clean_doi else Path(pdf_path).stem
@@ -1144,6 +1184,13 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
         try:
             print(f"Syncing item to Zotero library {user_id} via PyZotero...")
             zot = zotero.Zotero(library_id=user_id, library_type="user", api_key=api_key)
+
+            col_key = None
+            if target_collection_name:
+                col_key = resolve_zotero_collection_key(zot, target_collection_name)
+                if col_key:
+                    print(f"✓ Assigned target Zotero collection: '{target_collection_name}' (Key: {col_key})")
+
             template = zot.item_template("journalArticle")
             template["title"] = metadata.get("title", "Untitled")
             template["publicationTitle"] = metadata.get("venue", "")
@@ -1156,6 +1203,9 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
                 template["issue"] = str(metadata["issue"])
             if metadata.get("start_page") or metadata.get("end_page"):
                 template["pages"] = f"{metadata.get('start_page', '')}-{metadata.get('end_page', '')}".strip("-")
+
+            if col_key:
+                template["collections"] = [col_key]
 
             creators = []
             for author in metadata.get("authors", []):
@@ -1177,7 +1227,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
             resp = zot.create_items([template])
             if resp.get("successful"):
                 item_key = resp["successful"]["0"]["key"]
-                print(f"✓ Zotero parent item created (Key: {item_key}).")
+                print(f"✓ Zotero parent item created (Key: {item_key})" + (f" in collection '{target_collection_name}'." if col_key else "."))
                 # Attach PDF
                 try:
                     zot.attachment_simple([str(pdf_path)], item_key)
@@ -1197,6 +1247,8 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
                     "mode": "api_synced",
                     "item_key": item_key,
                     "library_id": user_id,
+                    "collection": target_collection_name if col_key else None,
+                    "collection_key": col_key,
                 }
         except Exception as e:
             print(f"Zotero API sync encountered an error ({e}); falling back to offline verified intake package.")
@@ -1227,6 +1279,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
         "authors": metadata.get("authors", []),
         "year": metadata.get("year", ""),
         "venue": metadata.get("venue", ""),
+        "target_collection": target_collection_name,
         "intake_status": "verified",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "package_files": {
@@ -1235,7 +1288,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
             "notes_markdown": str(dest_md.relative_to(ROOT)) if dest_md.is_relative_to(ROOT) else str(dest_md)
         },
         "import_guide": {
-            "zotero_desktop": "1. In Zotero Desktop, click File -> Import... -> Select citation.ris. 2. Drag paper.pdf and notes.md onto the newly created citation item.",
+            "zotero_desktop": f"1. In Zotero Desktop, open or create collection '{target_collection_name}'. 2. Click File -> Import... -> Select citation.ris. 3. Drag paper.pdf and notes.md onto the newly created citation item in '{target_collection_name}'.",
             "zotero_cloud": "Add ZOTERO_USER_ID and ZOTERO_API_KEY to your .env file to enable automated cloud upload."
         }
     }
@@ -1315,6 +1368,7 @@ def update_catalogue_records(doi, pdf_path, markdown_path, metadata):
 
 def process_target(doi=None, ris_record=None, institution=None, state_path=None,
                    output_dir=None, source_text_dir=None, zotero_dir=None,
+                   zotero_collection=None,
                    skip_download=False, skip_markdown=False, skip_zotero=False,
                    skip_oa=False, headless=True):
     """Execute the end-to-end pipeline (Download -> Markdown -> Zotero) for one target."""
@@ -1361,7 +1415,10 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
     metadata.setdefault("title", f"Paper {target_doi}")
 
     safe_name = doi_to_filename(target_doi)
-    pdf_dest = Path(output_dir or ROOT / "downloads") / f"{safe_name}.pdf"
+    auth_setup.load_env_vars()
+    default_dir = os.environ.get("PAPER_DOWNLOAD_DIR") or "downloads"
+    target_out = output_dir or (Path(default_dir).expanduser() if Path(default_dir).is_absolute() else ROOT / default_dir)
+    pdf_dest = Path(target_out).resolve() / f"{safe_name}.pdf"
 
     print("=" * 70)
     print(f" 🚀 Processing: {metadata.get('title')} ({target_doi})")
@@ -1406,7 +1463,8 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
             pdf_path=pdf_path,
             markdown_path=markdown_path,
             metadata=metadata,
-            zotero_dir=zotero_dir
+            zotero_dir=zotero_dir,
+            collection_name=zotero_collection
         )
     else:
         print("Step C (Zotero Sync) skipped.")
@@ -1427,9 +1485,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--doi", help="Target DOI string (e.g. 10.1002/cphy.c170043)")
     parser.add_argument("--ris", help="Path to an .ris citation file")
-    parser.add_argument("--output-dir", help="Directory for downloaded raw PDFs (default: downloads/)")
+    parser.add_argument("--output-dir", help="Directory for downloaded raw PDFs (default: $PAPER_DOWNLOAD_DIR or downloads/)")
     parser.add_argument("--source-text-dir", help="Directory for converted Markdown (default: working/source-text/)")
     parser.add_argument("--zotero-dir", help="Directory for Zotero intake packages (default: working/zotero_intake/)")
+    parser.add_argument("--zotero-collection", help="Target Zotero collection name (default: $ZOTERO_COLLECTION_NAME or 'New')")
     parser.add_argument("--state-path", help="Path to Playwright storage state JSON")
     parser.add_argument("--no-headless", action="store_true", help="Launch visible browser window")
     parser.add_argument("--skip-download", action="store_true", help="Skip download if PDF already exists")
@@ -1457,6 +1516,7 @@ def main():
                 output_dir=args.output_dir,
                 source_text_dir=args.source_text_dir,
                 zotero_dir=args.zotero_dir,
+                zotero_collection=args.zotero_collection,
                 skip_download=args.skip_download,
                 skip_markdown=args.skip_markdown,
                 skip_zotero=args.skip_zotero,
@@ -1471,6 +1531,7 @@ def main():
             output_dir=args.output_dir,
             source_text_dir=args.source_text_dir,
             zotero_dir=args.zotero_dir,
+            zotero_collection=args.zotero_collection,
             skip_download=args.skip_download,
             skip_markdown=args.skip_markdown,
             skip_zotero=args.skip_zotero,

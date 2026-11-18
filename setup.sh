@@ -16,4 +16,20 @@ python3 scripts/manage.py config --format json
 echo "=== 4. Running environment health doctor ==="
 python3 scripts/manage.py doctor
 
+echo ""
+echo "=== 5. Launching Interactive Onboarding Wizard ==="
+if [ -t 0 ]; then
+    read -p "Would you like to run the interactive setup wizard now? [Y/n] " run_wiz
+    if [[ "$run_wiz" =~ ^[Yy]?$ ]]; then
+        python3 scripts/setup_wizard.py
+    else
+        echo "You can launch the setup wizard anytime with:"
+        echo "  python3 scripts/setup_wizard.py"
+    fi
+else
+    echo "To configure your reference manager, target collection, and university SSO, run:"
+    echo "  python3 scripts/setup_wizard.py"
+fi
+
+echo ""
 echo "=== Setup complete! Your lit search pipeline is ready. ==="

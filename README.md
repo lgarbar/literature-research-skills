@@ -48,71 +48,79 @@ The retrieval architecture is decoupled into a dedicated session manager and an 
 
 ```mermaid
 flowchart TD
-    subgraph AuthSession["1. Institutional Authentication & Session (scripts/auth_setup.py)"]
-        User["User / Agent"] -->|"Run select_university.py"| Selector["University Selector (scripts/select_university.py)"]
+    subgraph Onboarding["1. Interactive Setup Wizard (scripts/setup_wizard.py)"]
+        User["User / Agent"] -->|"Run ./setup.sh & setup_wizard.py"| Wizard["Setup Wizard (scripts/setup_wizard.py)"]
+        Wizard -->|"Configure Manager & Collection"| EnvConfig[".env (REFERENCE_MANAGER, ZOTERO_COLLECTION_NAME=New, PAPER_DOWNLOAD_DIR)"]
+        Wizard -->|"Select University"| Selector["University Selector (scripts/select_university.py)"]
         Selector -->|"Loads Database"| UniDB["Top 100 Universities (config/universities.json)"]
-        Selector -->|"Saves Selection"| Config["Active Config (config/active_institution.json & .env)"]
-        Config --> Auth["Playwright SSO Login (scripts/auth_setup.py)"]
-        Auth -->|"Interactive Login / MFA"| IdP["Institutional SSO / EZproxy (e.g. Vanderbilt)"]
-        IdP -->|"Persists Session"| SessionState["Storage State (state/storage_state.json)"]
+        Selector -->|"Saves Selection"| Config["Active Config (config/active_institution.json)"]
+        Wizard -->|"SSO Login & MFA"| Auth["Playwright SSO Login (scripts/auth_setup.py)"]
+        Auth -->|"Persists Session"| SessionState["Storage State (state/storage_state.json)"]
     end
 
     subgraph Pipeline["2. End-to-End Processing Pipeline (scripts/fetch_and_process.py)"]
-        Input["Target Input (DOI string or .ris file)"] --> StepA["Step A: Authenticated Download"]
+        Input["Target Input (DOI string or .ris file)"] --> OADetect{"Open Access Detection"}
+        OADetect -->|"Known OA / Unpaywall / Crossref\n(eLife, PLOS, Frontiers, arXiv, PMC)"| DirectHTTP["Direct HTTP / Unauthenticated Browser\n(Bypasses EZproxy & SSO)"]
+        OADetect -->|"Subscription / Paywalled"| StepA["Step A: Authenticated Download via EZproxy"]
         Config -.-> StepA
         SessionState -.-> StepA
-        StepA -->|"PDF Stream / Iframe Capture"| RawPDF["Raw PDF (downloads/<doi>.pdf)"]
+        
+        DirectHTTP --> RawPDF["Raw PDF (downloads/<doi>.pdf)"]
+        StepA --> RawPDF
+        
         RawPDF -->|"Mechanical Verification"| StepB["Step B: Markdown Conversion (PyMuPDF4LLM)"]
         StepB -->|"Layout Parsing + YAML Frontmatter"| SourceMD["Structured Markdown (working/source-text/<doi>.md)"]
         
         SourceMD --> StepC{"Step C: Zotero Sync or Intake Package"}
         RawPDF --> StepC
         
-        StepC -->|"If ZOTERO_API_KEY Configured"| ZoteroCloud["PyZotero Cloud Sync (Item + PDF + Note)"]
+        StepC -->|"If ZOTERO_API_KEY Configured"| ZoteroCloud["PyZotero Cloud Sync\n(Filed to target collection e.g. 'New' + PDF + Note)"]
         StepC -->|"Default / Offline Fallback"| IntakePkg["Verified Zotero Intake Package (working/zotero_intake/<doi>/)"]
-        IntakePkg --> IntakeFiles["• citation.ris\n• paper.pdf\n• notes.md\n• manifest.json"]
+        IntakePkg --> IntakeFiles["• citation.ris\n• paper.pdf\n• notes.md\n• manifest.json (with target collection)"]
     end
 ```
 
 ### Quick Setup
 
-1. **Select Your University**:
-   Launch the interactive selection CLI:
+1. **Install Dependencies First (`./setup.sh`)**:
+   Run the automated setup script from the repository root to create a Python virtual environment, install pinned dependencies, and register skill definitions:
    ```sh
-   python3 scripts/select_university.py
+   ./setup.sh
    ```
-   Or specify an institution directly by ID:
-   ```sh
-   python3 scripts/select_university.py --id vanderbilt
-   ```
-   This automatically updates `config/active_institution.json` and your local `.env`.
 
-2. **Authenticate with Your Library Portal (One-Time SSO)**:
-   Launch the decoupled Playwright session manager to sign in through your institution's SSO / Duo MFA:
+2. **Run the Interactive Setup Wizard (`scripts/setup_wizard.py`)**:
+   Launch the onboarding wizard to configure your reference manager, target collection, university library SSO, and download paths:
    ```sh
-   python3 scripts/auth_setup.py
-   # or convenience entrypoint:
-   python3 auth_setup.py
+   python3 scripts/setup_wizard.py
+   # or convenience root entrypoint:
+   python3 setup_wizard.py
    ```
-   Your authenticated session cookies are saved securely to `state/storage_state.json` (gitignored). You can verify session status anytime via:
-   ```sh
-   python3 scripts/auth_setup.py --check
-   ```
+   **What the wizard configures:**
+   - **Reference Manager**: Select **Zotero** (with automated API cloud sync, PDF, and Markdown notes attachment), **Paperpile**, **Mendeley**, or **EndNote**. For Zotero, prompts for your User ID and API Key.
+   - **Target Collection**: Prompts for your target Zotero collection name (defaulting to `"New"`). Newly processed papers are automatically filed directly into this collection.
+   - **University Library & EZproxy SSO**: Selects your university from `config/universities.json` (e.g. Vanderbilt University) and launches a one-time interactive browser window to capture SSO/Duo session cookies into `state/storage_state.json`.
+   - **Download Directory**: Saves your preferred paper storage path (defaulting to `downloads/`), saved to `PAPER_DOWNLOAD_DIR` in `.env`.
 
 3. **Run the End-to-End Pipeline (Download → Markdown → Zotero)**:
-   Retrieve papers, convert them into clean structured Markdown, and sync or package them for Zotero in a single step:
+   Retrieve papers, convert them into clean structured Markdown, and sync or package them directly into your target Zotero collection in a single step:
    ```sh
    # Process via target DOI (supports Wiley, Springer, HighWire, and Elsevier/ScienceDirect)
    python3 scripts/fetch_and_process.py --doi "10.1016/j.tics.2006.10.012"
+
+   # Open Access DOIs (eLife, PLOS, Frontiers, arXiv, PMC) automatically bypass EZproxy
+   python3 scripts/fetch_and_process.py --doi "10.1371/journal.pone.0210000"
+
+   # Target a specific Zotero collection on the fly
+   python3 scripts/fetch_and_process.py --doi "10.7554/elife.27798" --zotero-collection "Neuroscience"
 
    # Process via citation RIS file
    python3 scripts/fetch_and_process.py --ris "review/citations.ris"
    ```
 
    **Pipeline Stages:**
-   - **Step A (Download)**: Uses the active institutional session to stream raw PDFs from publisher gateways or direct binary endpoints (including specialized ScienceDirect PII resolution and response interception) into `downloads/`, verified via `source_files.py`.
+   - **Step A (Download)**: Automatically detects Open Access DOIs (eLife, PLOS, Frontiers, arXiv, PMC, BioMed Central, MDPI) and retrieves the PDF directly via HTTP/browser fetch bypassing EZproxy. For paywalled papers, uses your active institutional session to stream raw PDFs from publisher gateways into `downloads/` (or `$PAPER_DOWNLOAD_DIR`), verified via `source_files.py`.
    - **Step B (Markdown Conversion)**: Employs `pymupdf4llm` to extract document structure, headers, and tables into `working/source-text/<doi>.md` with YAML frontmatter.
-   - **Step C (Zotero Sync / Intake)**: If `ZOTERO_USER_ID` and `ZOTERO_API_KEY` are present in `.env`, automatically creates the Zotero library item and attaches both PDF and Markdown note. Otherwise, generates a verified offline intake package (`working/zotero_intake/<doi>/`) containing `citation.ris`, `paper.pdf`, `notes.md`, and `manifest.json`.
+   - **Step C (Zotero Sync / Intake)**: If `ZOTERO_USER_ID` and `ZOTERO_API_KEY` are present in `.env`, automatically creates the Zotero library item in the target collection (specified by `ZOTERO_COLLECTION_NAME`, defaulting to `"New"`) and attaches both PDF and Markdown note. Otherwise, generates a verified offline intake package (`working/zotero_intake/<doi>/`) containing `citation.ris`, `paper.pdf`, `notes.md`, and `manifest.json`.
 
 ## What the workflow preserves
 

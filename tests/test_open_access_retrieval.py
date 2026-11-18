@@ -209,6 +209,63 @@ class TestOpenAccessRetrieval(unittest.TestCase):
                 self.assertTrue((pkg_dir / "notes.md").is_file())
                 self.assertTrue((pkg_dir / "manifest.json").is_file())
 
+    def test_resolve_zotero_collection_key_existing(self):
+        mock_zot = MagicMock()
+        mock_zot.all_collections.return_value = [
+            {"key": "EXISTING123", "data": {"name": "New", "key": "EXISTING123"}},
+            {"key": "OTHER456", "data": {"name": "Archive", "key": "OTHER456"}},
+        ]
+        key = fetch_and_process.resolve_zotero_collection_key(mock_zot, "New")
+        self.assertEqual(key, "EXISTING123")
+        mock_zot.create_collections.assert_not_called()
+
+    def test_resolve_zotero_collection_key_creates_new(self):
+        mock_zot = MagicMock()
+        mock_zot.all_collections.return_value = [
+            {"key": "OTHER456", "data": {"name": "Archive", "key": "OTHER456"}},
+        ]
+        mock_zot.create_collections.return_value = {
+            "successful": {"0": {"key": "NEWLY_CREATED_KEY"}}
+        }
+        key = fetch_and_process.resolve_zotero_collection_key(mock_zot, "New")
+        self.assertEqual(key, "NEWLY_CREATED_KEY")
+        mock_zot.create_collections.assert_called_once_with([{"name": "New"}])
+
+    def test_step_c_assigns_collection_directly_to_zotero_item(self):
+        fake_pdf = self.output_dir / "paper.pdf"
+        fake_md = self.source_text_dir / "paper.md"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.source_text_dir.mkdir(parents=True, exist_ok=True)
+        fake_pdf.write_bytes(b"%PDF-1.4\n" + b"X" * 1000)
+        fake_md.write_text("# Title\n\nContent", encoding="utf-8")
+
+        mock_zot_instance = MagicMock()
+        mock_zot_instance.all_collections.return_value = [
+            {"key": "COLL_KEY_NEW", "data": {"name": "New", "key": "COLL_KEY_NEW"}}
+        ]
+        mock_zot_instance.item_template.return_value = {"itemType": "journalArticle", "title": ""}
+        mock_zot_instance.create_items.return_value = {"successful": {"0": {"key": "ITEM123"}}}
+
+        with patch.dict(os.environ, {"ZOTERO_API_KEY": "fake_key", "ZOTERO_USER_ID": "12345", "ZOTERO_COLLECTION_NAME": "New"}):
+            with patch("fetch_and_process.zotero.Zotero", return_value=mock_zot_instance):
+                res = fetch_and_process.step_c_sync_or_package_zotero(
+                    pdf_path=fake_pdf,
+                    markdown_path=fake_md,
+                    metadata={"title": "Test Paper", "doi": "10.1234/test", "authors": ["Tester"]},
+                    zotero_dir=self.zotero_dir,
+                    collection_name="New"
+                )
+
+                self.assertEqual(res["mode"], "api_synced")
+                self.assertEqual(res["item_key"], "ITEM123")
+                self.assertEqual(res["collection"], "New")
+                self.assertEqual(res["collection_key"], "COLL_KEY_NEW")
+
+                # Verify collections assigned on created item
+                created_payload = mock_zot_instance.create_items.call_args[0][0][0]
+                self.assertIn("collections", created_payload)
+                self.assertEqual(created_payload["collections"], ["COLL_KEY_NEW"])
+
 
 if __name__ == "__main__":
     unittest.main()
