@@ -220,7 +220,8 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                             state_path=state_file,
                             output_dir=out_dir,
                             headless=True,
-                            skip_oa=True
+                            skip_oa=True,
+                            interactive_fallback=False
                         )
 
                     self.assertIn("HTML", str(ctx.exception))

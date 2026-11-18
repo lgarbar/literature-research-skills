@@ -105,6 +105,63 @@ def is_valid_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES):
         return False
 
 
+ANTI_BOT_PROMPT = "Automated retrieval blocked by anti-bot challenge. Please complete the challenge or download the PDF manually in the browser, then press Enter to resume..."
+
+
+def log_failure(doi, failure_stage, error, endpoint_url=None, working_dir=None):
+    """Two-tier error logging system:
+    1. working/error_audit.jsonl: Detailed JSON lines log capturing timestamp, DOI, failure stage, error type, and endpoint URL.
+    2. working/failed_papers.log: Clean, deduplicated summary log. Checks if DOI is already logged so repeat runs do not flood the file with redundant entries.
+    """
+    clean_doi = normalize_doi(doi) if doi else "unknown"
+    w_dir = Path(working_dir or ROOT / "working").resolve()
+    w_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    error_type = type(error).__name__ if isinstance(error, BaseException) else str(error)
+    error_msg = str(error) if isinstance(error, BaseException) else ""
+
+    # Tier 1: Detailed JSON lines audit log
+    audit_file = w_dir / "error_audit.jsonl"
+    audit_entry = {
+        "timestamp": timestamp,
+        "doi": clean_doi,
+        "failure_stage": failure_stage,
+        "error_type": error_type,
+        "endpoint_url": endpoint_url or "",
+        "error_message": error_msg,
+    }
+    try:
+        with open(audit_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"  Note: Failed writing to {audit_file.name}: {e}")
+
+    # Tier 2: Clean, deduplicated summary log
+    summary_file = w_dir / "failed_papers.log"
+    already_logged = False
+    if summary_file.is_file():
+        try:
+            content = summary_file.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if clean_doi.lower() in line.lower():
+                    already_logged = True
+                    break
+        except Exception:
+            already_logged = False
+
+    if not already_logged:
+        summary_line = f"[{timestamp}] DOI: {clean_doi} | Stage: {failure_stage} | Error: {error_type} - {error_msg}\n"
+        try:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write(summary_line)
+            print(f"Logged failure to {summary_file.name} (DOI: {clean_doi})")
+        except Exception as e:
+            print(f"  Note: Failed writing to {summary_file.name}: {e}")
+    else:
+        print(f"DOI {clean_doi} already logged in {summary_file.name}; skipping duplicate summary entry.")
+
+
 SCIENCEDIRECT_PDF_SELECTORS = [
     "#pdf-download-link",
     "a.pdf-download-link",
@@ -798,7 +855,186 @@ def download_oa_via_unauthenticated_browser(candidate_urls, pdf_path, headless=T
         return False
 
 
-def step_a_download_paper(doi, institution=None, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True, skip_oa=False, interactive_fallback=True):
+def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pii=None, safe_name=None, institution=None):
+    """Fallback for single-DOI mode: open publisher page in visible browser window for manual/challenge resolution."""
+    print("\n" + "=" * 70)
+    print(" 🖥️  Activating Interactive Headed Fallback (Single-DOI Mode)")
+    print(f" Target: {target_url}")
+    print("=" * 70)
+
+    auth_setup.load_env_vars()
+    s_file = session_file or auth_setup.get_existing_state_path()
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("Playwright is required for interactive headed fallback.")
+
+    clean_doi = normalize_doi(doi)
+    s_name = safe_name or doi_to_filename(clean_doi)
+    pdf_path = Path(pdf_path).resolve()
+    download_dir = pdf_path.parent
+    download_dir.mkdir(parents=True, exist_ok=True)
+    html_fallback_detected = False
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
+        context_kwargs = {
+            "accept_downloads": True,
+            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        }
+        if s_file and Path(s_file).is_file():
+            context_kwargs["storage_state"] = str(s_file)
+
+        context = browser.new_context(**context_kwargs)
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = context.new_page()
+
+        # Listen for downloads triggered by user clicks in headed browser
+        def on_browser_download(download):
+            try:
+                print(f"Intercepted browser download: {download.suggested_filename}")
+                download.save_as(str(pdf_path))
+            except Exception as e:
+                print(f"  Note saving intercepted download: {e}")
+
+        page.on("download", on_browser_download)
+
+        print(f"Navigating visible browser to publisher page: {target_url}...")
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            print(f"  Browser navigation notice: {e}")
+
+        try:
+            page_content = page.content()
+            prefix = page_content[:500].strip().lower()
+            if "<html" in prefix or "<!doctype html" in prefix:
+                html_fallback_detected = True
+        except Exception:
+            pass
+
+        # Prompt the user
+        try:
+            input(f"\n{ANTI_BOT_PROMPT}\n")
+        except (EOFError, KeyboardInterrupt):
+            print("\nResuming pipeline...")
+
+        # If user completed challenge in browser without triggering a manual download,
+        # attempt to grab the PDF stream or trigger download now that cookies/session are active
+        if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path)):
+            try:
+                # 1. Check if current browser page is already displaying a PDF stream
+                content_type = page.evaluate("() => document.contentType")
+                if content_type == "application/pdf":
+                    resp = context.request.get(page.url, timeout=20000)
+                    if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                        pdf_path.write_bytes(resp.body())
+            except Exception:
+                pass
+
+        if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path)):
+            # 2. If ScienceDirect, try navigating directly to pdfft download endpoint
+            resolved_pii = pii
+            if not resolved_pii:
+                pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', page.url, re.I)
+                if pii_m:
+                    resolved_pii = pii_m.group(1)
+            if resolved_pii:
+                sd_direct_url = f"https://www.sciencedirect.com/science/article/pii/{resolved_pii}/pdfft?isDTMRedir=true&download=true"
+                try:
+                    with page.expect_download(timeout=15000) as dl_info:
+                        try:
+                            page.goto(sd_direct_url, timeout=15000)
+                        except Exception:
+                            pass
+                    dl = dl_info.value
+                    dl.save_as(str(pdf_path))
+                except Exception:
+                    pass
+
+        if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path)):
+            # 3. Check standard publisher download button selectors
+            for sel in MAJOR_PUBLISHER_PDF_SELECTORS + SCIENCEDIRECT_PDF_SELECTORS:
+                try:
+                    btn = page.query_selector(sel)
+                    if btn:
+                        with page.expect_download(timeout=10000) as dl_info:
+                            btn.click()
+                        dl = dl_info.value
+                        dl.save_as(str(pdf_path))
+                        if pdf_path.is_file() and is_valid_pdf_stream(pdf_path):
+                            break
+                except Exception:
+                    pass
+
+        # Save session state if cookies were updated
+        if s_file:
+            try:
+                context.storage_state(path=str(s_file))
+            except Exception:
+                pass
+
+        browser.close()
+
+    # Once the user confirms, verify the downloaded PDF in downloads/
+    # 1. Check if direct pdf_path is valid
+    if pdf_path.is_file():
+        if is_valid_pdf_stream(pdf_path):
+            report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            if report.get("mechanical_status") == "pass":
+                print(f"✓ Verified downloaded PDF in {pdf_path.name} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
+                return pdf_path, report
+        else:
+            try:
+                b = pdf_path.read_bytes()
+                if b"<html" in b[:500].lower() or b"<!doctype html" in b[:500].lower():
+                    html_fallback_detected = True
+            except Exception:
+                pass
+            pdf_path.unlink(missing_ok=True)
+
+    # 2. Check local user intake (~/Downloads)
+    local_intake = check_local_downloads(pii=pii, safe_name=s_name)
+    if local_intake and is_valid_pdf_stream(local_intake):
+        print(f"✓ Detected matching publisher PDF in user downloads: {local_intake.name} ({local_intake.stat().st_size:,} bytes)")
+        shutil.copy2(local_intake, pdf_path)
+        report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+        if report.get("mechanical_status") == "pass":
+            print(f"✓ Verified and imported publisher PDF to {pdf_path}")
+            return pdf_path, report
+        else:
+            pdf_path.unlink(missing_ok=True)
+
+    # 3. Check for any freshly created valid PDF in download_dir
+    for cand in sorted(download_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if cand != pdf_path and cand.is_file() and is_valid_pdf_stream(cand):
+            shutil.copy2(cand, pdf_path)
+            report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            if report.get("mechanical_status") == "pass":
+                print(f"✓ Imported valid PDF from {cand.name} to {pdf_path}")
+                return pdf_path, report
+            else:
+                pdf_path.unlink(missing_ok=True)
+
+    if html_fallback_detected:
+        err = InvalidPDFError(
+            "Automated retrieval blocked by anti-bot challenge: Publisher page returned HTML fallback or challenge screen."
+        )
+        err.endpoint_url = target_url
+        raise err
+
+    err = InvalidPDFError(
+        f"Automated retrieval blocked by anti-bot challenge. Failed to find valid binary PDF (> 100 KB) for DOI {clean_doi} in {download_dir} after interactive session."
+    )
+    err.endpoint_url = target_url
+    raise err
+
+
+def step_a_download_paper(doi, institution=None, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True, skip_oa=False, interactive_fallback=True, is_batch=False):
     """Step A: Download raw paper PDF using Open-Access direct fetch or authenticated institutional session."""
     auth_setup.load_env_vars()
     clean_doi = normalize_doi(doi)
@@ -903,431 +1139,464 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
         springer_direct = f"https://link.springer.com/content/pdf/{clean_doi}.pdf"
         direct_candidates.append(auth_setup.get_proxied_url(springer_direct, institution))
 
-    max_auth_attempts = 2 if interactive_fallback else 1
+    max_auth_attempts = 2 if (interactive_fallback and not is_batch) else 1
     current_headless = headless
 
-    for attempt in range(max_auth_attempts):
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=current_headless,
-                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
-                )
-                context = browser.new_context(
-                    storage_state=str(session_file),
-                    accept_downloads=True,
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                page = context.new_page()
+    try:
+        for attempt in range(max_auth_attempts):
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(
+                        headless=current_headless,
+                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                    )
+                    context = browser.new_context(
+                        storage_state=str(session_file),
+                        accept_downloads=True,
+                        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    )
+                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    page = context.new_page()
 
-                pdf_bytes = None
-                intercepted_pdfs = []
+                    pdf_bytes = None
+                    intercepted_pdfs = []
 
-                def on_response_stream(res):
-                    ct = res.headers.get("content-type", "").lower()
-                    if ("application/pdf" in ct or "octet-stream" in ct or "/pdfft" in res.url.lower() or res.url.lower().endswith(".pdf")) and res.status == 200:
-                        try:
-                            b = res.body()
-                            if is_valid_pdf_stream(b):
-                                intercepted_pdfs.append(b)
-                        except Exception:
-                            pass
-
-                context.on("response", on_response_stream)
-                page.on("response", on_response_stream)
-
-                # Specialized ScienceDirect / Elsevier Resolver
-                if is_sciencedirect:
-                    print(f"Navigating to ScienceDirect article landing page: {proxied_article_url}")
-                    page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
-                    page.wait_for_timeout(2000)
-
-                    if auth_setup.is_login_or_challenge(page=page, institution=institution):
-                        raise auth_setup.InstitutionalAuthChallenge(
-                            message="Institutional login wall or 2FA prompt detected during ScienceDirect navigation",
-                            target_url=proxied_article_url
-                        )
-
-                    # 1. Direct ScienceDirect PII Resolution:
-                    # Resolve article's PII from landing page URL, meta tags, context.request query, or direct API query
-                    if not sd_pii:
-                        pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', page.url, re.I)
-                        if pii_m:
-                            sd_pii = pii_m.group(1)
-                            print(f"Resolved ScienceDirect PII from landing page URL: {sd_pii}")
-
-                    if not sd_pii:
-                        try:
-                            meta_pii = page.eval_on_selector("meta[name='citation_pii']", "el => el.content")
-                            if meta_pii:
-                                sd_pii = meta_pii.strip()
-                                print(f"Resolved ScienceDirect PII from meta citation_pii: {sd_pii}")
-                        except Exception:
-                            pass
-
-                    if not sd_pii:
-                        try:
-                            meta_pii = page.eval_on_selector("meta[name='article:pii']", "el => el.content")
-                            if meta_pii:
-                                sd_pii = meta_pii.strip()
-                                print(f"Resolved ScienceDirect PII from meta article:pii: {sd_pii}")
-                        except Exception:
-                            pass
-
-                    if not sd_pii:
-                        # Direct landing page query via Playwright authenticated request context
-                        try:
-                            landing_resp = context.request.get(proxied_article_url, timeout=20000)
-                            if auth_setup.is_login_or_challenge(url=landing_resp.url, institution=institution):
-                                raise auth_setup.InstitutionalAuthChallenge(
-                                    message="Institutional login wall detected while querying ScienceDirect landing page",
-                                    target_url=proxied_article_url
-                                )
-                            m = re.search(r'/article/pii/([A-Z0-9]+)', landing_resp.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', landing_resp.url, re.I)
-                            if m:
-                                sd_pii = m.group(1)
-                                print(f"Resolved ScienceDirect PII from landing request redirect: {sd_pii}")
-                            else:
-                                text = landing_resp.text()
-                                m = (
-                                    re.search(r'name=["\']citation_pii["\']\s+content=["\']([A-Z0-9]+)["\']', text, re.I) or
-                                    re.search(r'content=["\']([A-Z0-9]+)["\']\s+name=["\']citation_pii["\']', text, re.I) or
-                                    re.search(r'"pii"\s*:\s*"([A-Z0-9]+)"', text, re.I) or
-                                    re.search(r'/article/pii/([A-Z0-9]+)', text, re.I) or
-                                    re.search(r'/pii/([A-Z0-9]+)', text, re.I)
-                                )
-                                if m:
-                                    sd_pii = m.group(1)
-                                    print(f"Resolved ScienceDirect PII from landing request body: {sd_pii}")
-                        except auth_setup.InstitutionalAuthChallenge:
-                            raise
-                        except Exception as e:
-                            print(f"  Note on context.request PII resolution: {e}")
-
-                    if not sd_pii:
-                        # Direct API query (Crossref / DataCite metadata)
-                        res_meta = resolve_doi_metadata(clean_doi)
-                        if res_meta and res_meta.get("pii"):
-                            sd_pii = res_meta["pii"]
-                            print(f"Resolved ScienceDirect PII from API query: {sd_pii}")
-
-                    if not sd_pii:
-                        raise InvalidPDFError(f"Could not resolve ScienceDirect PII for DOI {clean_doi} from landing page or direct API query.")
-
-                    # Check if page navigation directly loaded a PDF stream
-                    try:
-                        content_type = page.evaluate("() => document.contentType")
-                        if content_type == "application/pdf":
-                            resp = context.request.get(page.url, timeout=25000)
-                            if resp.status == 200 and resp.body().startswith(b"%PDF-"):
-                                validate_pdf_stream(resp.body())
-                                pdf_bytes = resp.body()
-                                print(f"✓ Current ScienceDirect page is directly a PDF stream ({len(pdf_bytes):,} bytes).")
-                    except Exception:
-                        pass
-
-                    # 2. Directly fetch PDF stream from Elsevier's official direct download endpoint format:
-                    # https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true
-                    # Uses page.goto(endpoint_url) within active browser context and page.expect_download() to intercept stream
-                    if not pdf_bytes:
-                        official_pdf_url = f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true"
-                        print(f"Direct ScienceDirect PDF download targeting official endpoint: {official_pdf_url}")
-
-                        candidate_pdf_urls = [official_pdf_url]
-                        parsed_u = urlsplit(page.url)
-                        base_origin = f"{parsed_u.scheme}://{parsed_u.netloc}"
-                        if base_origin and "sciencedirect.com" not in parsed_u.netloc:
-                            candidate_pdf_urls.append(f"{base_origin}/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true")
-
-                        proxied_candidate = auth_setup.get_proxied_url(official_pdf_url, institution)
-                        if proxied_candidate not in candidate_pdf_urls:
-                            candidate_pdf_urls.append(proxied_candidate)
-
-                        html_fallback_detected = False
-                        last_html_body = None
-
-                        for target_pdf_url in candidate_pdf_urls:
-                            print(f"Navigating browser to direct ScienceDirect PDF endpoint: {target_pdf_url}")
+                    def on_response_stream(res):
+                        ct = res.headers.get("content-type", "").lower()
+                        if ("application/pdf" in ct or "octet-stream" in ct or "/pdfft" in res.url.lower() or res.url.lower().endswith(".pdf")) and res.status == 200:
                             try:
-                                download = None
-                                try:
-                                    with page.expect_download(timeout=25000) as download_info:
-                                        try:
-                                            page.goto(target_pdf_url, timeout=25000)
-                                        except Exception:
-                                            # page.goto typically raises net::ERR_ABORTED when navigation triggers a browser download
-                                            pass
-                                    download = download_info.value
-                                except Exception as dl_err:
-                                    print(f"  Download event listener did not capture download for {target_pdf_url}: {dl_err}")
+                                b = res.body()
+                                if is_valid_pdf_stream(b):
+                                    intercepted_pdfs.append(b)
+                            except Exception:
+                                pass
 
-                                raw_bytes = None
-                                if download:
-                                    temp_pdf = out_dir / f".tmp_{safe_name}.pdf"
-                                    try:
-                                        download.save_as(str(temp_pdf))
-                                        if temp_pdf.is_file():
-                                            raw_bytes = temp_pdf.read_bytes()
-                                    except Exception as save_err:
-                                        print(f"  Download save_as error: {save_err}")
-                                    finally:
-                                        temp_pdf.unlink(missing_ok=True)
+                    context.on("response", on_response_stream)
+                    page.on("response", on_response_stream)
 
-                                    if not raw_bytes and hasattr(download, "path"):
-                                        try:
-                                            dp = download.path()
-                                            if dp and Path(dp).is_file():
-                                                raw_bytes = Path(dp).read_bytes()
-                                        except Exception:
-                                            pass
-
-                                if raw_bytes:
-                                    prefix = raw_bytes[:500].decode("utf-8", errors="replace").strip().lower()
-                                    if "<html" in prefix or "<!doctype html" in prefix:
-                                        html_fallback_detected = True
-                                        last_html_body = raw_bytes
-                                        print(f"  Warning: Download from {target_pdf_url} returned an HTML document ({len(raw_bytes):,} bytes).")
-                                        continue
-
-                                    # Validate %PDF- magic bytes header
-                                    if not raw_bytes.startswith(b"%PDF-"):
-                                        raise InvalidPDFError(
-                                            f"ScienceDirect downloaded file missing %PDF- magic bytes header. Starting bytes: {raw_bytes[:20]!r}"
-                                        )
-
-                                    validate_pdf_stream(raw_bytes)
-                                    pdf_bytes = raw_bytes
-                                    print(f"✓ Intercepted and validated binary PDF stream via expect_download ({len(pdf_bytes):,} bytes).")
-                                    break
-                                else:
-                                    # No download captured; inspect page for institutional login challenge or HTML fallback
-                                    if auth_setup.is_login_or_challenge(page=page, institution=institution):
-                                        raise auth_setup.InstitutionalAuthChallenge(
-                                            message="ScienceDirect direct PDF endpoint redirected to institutional login wall",
-                                            target_url=target_pdf_url
-                                        )
-
-                                    try:
-                                        page_html = page.content()
-                                        prefix = page_html[:500].strip().lower()
-                                        if "<html" in prefix or "<!doctype html" in prefix:
-                                            html_fallback_detected = True
-                                            last_html_body = page_html.encode("utf-8")
-                                            print(f"  Warning: Navigation to {target_pdf_url} rendered an HTML fallback page.")
-                                    except Exception:
-                                        pass
-
-                            except auth_setup.InstitutionalAuthChallenge:
-                                raise
-                            except InvalidPDFError:
-                                raise
-                            except Exception as fetch_err:
-                                print(f"  Direct PDF fetch note for {target_pdf_url}: {fetch_err}")
-
-                        # If no valid PDF bytes retrieved and an HTML fallback page was returned, raise InvalidPDFError
-                        if not pdf_bytes and html_fallback_detected:
-                            raise InvalidPDFError(
-                                f"ScienceDirect returned an HTML fallback page ({len(last_html_body):,} bytes) rather than valid PDF bytes. "
-                                f"Official endpoint: {official_pdf_url}"
-                            )
-
-                else:
-                    # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
-                    # Strategy 1: Try authenticated direct PDF endpoint
-                    for candidate in direct_candidates:
-                        print(f"Attempting direct PDF retrieval via {candidate[:80]}...")
-                        try:
-                            resp = context.request.get(candidate, timeout=25000)
-                            if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
-                                raise auth_setup.InstitutionalAuthChallenge(
-                                    message="Direct candidate endpoint redirected to institutional login wall",
-                                    target_url=candidate
-                                )
-                            if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                print(f"✓ Direct PDF endpoint returned {len(resp.body()):,} bytes.")
-                                pdf_bytes = resp.body()
-                                break
-                        except auth_setup.InstitutionalAuthChallenge:
-                            raise
-                        except Exception as e:
-                            print(f"  Direct probe note: {e}")
-
-                    # Strategy 2: Navigate proxied page and capture viewer/iframe or download trigger
-                    if not pdf_bytes:
-                        print(f"Navigating to proxied article page: {proxied_article_url}")
+                    # Specialized ScienceDirect / Elsevier Resolver
+                    if is_sciencedirect:
+                        print(f"Navigating to ScienceDirect article landing page: {proxied_article_url}")
                         page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
-                        page.wait_for_timeout(3000)
+                        page.wait_for_timeout(2000)
 
                         if auth_setup.is_login_or_challenge(page=page, institution=institution):
                             raise auth_setup.InstitutionalAuthChallenge(
-                                message="Institutional login wall or 2FA prompt detected during publisher navigation",
+                                message="Institutional login wall or 2FA prompt detected during ScienceDirect navigation",
                                 target_url=proxied_article_url
                             )
 
-                        # Check if current response or page is directly a PDF
+                        # 1. Direct ScienceDirect PII Resolution:
+                        # Resolve article's PII from landing page URL, meta tags, context.request query, or direct API query
+                        if not sd_pii:
+                            pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', page.url, re.I)
+                            if pii_m:
+                                sd_pii = pii_m.group(1)
+                                print(f"Resolved ScienceDirect PII from landing page URL: {sd_pii}")
+
+                        if not sd_pii:
+                            try:
+                                meta_pii = page.eval_on_selector("meta[name='citation_pii']", "el => el.content")
+                                if meta_pii:
+                                    sd_pii = meta_pii.strip()
+                                    print(f"Resolved ScienceDirect PII from meta citation_pii: {sd_pii}")
+                            except Exception:
+                                pass
+
+                        if not sd_pii:
+                            try:
+                                meta_pii = page.eval_on_selector("meta[name='article:pii']", "el => el.content")
+                                if meta_pii:
+                                    sd_pii = meta_pii.strip()
+                                    print(f"Resolved ScienceDirect PII from meta article:pii: {sd_pii}")
+                            except Exception:
+                                pass
+
+                        if not sd_pii:
+                            # Direct landing page query via Playwright authenticated request context
+                            try:
+                                landing_resp = context.request.get(proxied_article_url, timeout=20000)
+                                if auth_setup.is_login_or_challenge(url=landing_resp.url, institution=institution):
+                                    raise auth_setup.InstitutionalAuthChallenge(
+                                        message="Institutional login wall detected while querying ScienceDirect landing page",
+                                        target_url=proxied_article_url
+                                    )
+                                m = re.search(r'/article/pii/([A-Z0-9]+)', landing_resp.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', landing_resp.url, re.I)
+                                if m:
+                                    sd_pii = m.group(1)
+                                    print(f"Resolved ScienceDirect PII from landing request redirect: {sd_pii}")
+                                else:
+                                    text = landing_resp.text()
+                                    m = (
+                                        re.search(r'name=["\']citation_pii["\']\s+content=["\']([A-Z0-9]+)["\']', text, re.I) or
+                                        re.search(r'content=["\']([A-Z0-9]+)["\']\s+name=["\']citation_pii["\']', text, re.I) or
+                                        re.search(r'"pii"\s*:\s*"([A-Z0-9]+)"', text, re.I) or
+                                        re.search(r'/article/pii/([A-Z0-9]+)', text, re.I) or
+                                        re.search(r'/pii/([A-Z0-9]+)', text, re.I)
+                                    )
+                                    if m:
+                                        sd_pii = m.group(1)
+                                        print(f"Resolved ScienceDirect PII from landing request body: {sd_pii}")
+                            except auth_setup.InstitutionalAuthChallenge:
+                                raise
+                            except Exception as e:
+                                print(f"  Note on context.request PII resolution: {e}")
+
+                        if not sd_pii:
+                            # Direct API query (Crossref / DataCite metadata)
+                            res_meta = resolve_doi_metadata(clean_doi)
+                            if res_meta and res_meta.get("pii"):
+                                sd_pii = res_meta["pii"]
+                                print(f"Resolved ScienceDirect PII from API query: {sd_pii}")
+
+                        if not sd_pii:
+                            raise InvalidPDFError(f"Could not resolve ScienceDirect PII for DOI {clean_doi} from landing page or direct API query.")
+
+                        # Check if page navigation directly loaded a PDF stream
                         try:
                             content_type = page.evaluate("() => document.contentType")
                             if content_type == "application/pdf":
                                 resp = context.request.get(page.url, timeout=25000)
-                                if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                if resp.status == 200 and resp.body().startswith(b"%PDF-"):
+                                    validate_pdf_stream(resp.body())
                                     pdf_bytes = resp.body()
+                                    print(f"✓ Current ScienceDirect page is directly a PDF stream ({len(pdf_bytes):,} bytes).")
                         except Exception:
                             pass
 
-                        # Check for embedded PDF iframe (e.g., Wiley viewer: iframe#pdf-iframe)
+                        # 2. Directly fetch PDF stream from Elsevier's official direct download endpoint format:
+                        # https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true
+                        # Uses page.goto(endpoint_url) within active browser context and page.expect_download() to intercept stream
                         if not pdf_bytes:
-                            for selector in ["iframe#pdf-iframe", "iframe[src*='pdf']", "embed[type='application/pdf']", "iframe"]:
-                                el = page.query_selector(selector)
-                                if el:
-                                    src = el.get_attribute("src")
-                                    if src and ("pdf" in src.lower() or "direct" in src.lower()):
-                                        iframe_url = src if src.startswith("http") else urljoin(page.url, src)
-                                        print(f"Found embedded PDF source: {iframe_url[:80]}...")
+                            official_pdf_url = f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true"
+                            print(f"Direct ScienceDirect PDF download targeting official endpoint: {official_pdf_url}")
+
+                            candidate_pdf_urls = [official_pdf_url]
+                            parsed_u = urlsplit(page.url)
+                            base_origin = f"{parsed_u.scheme}://{parsed_u.netloc}"
+                            if base_origin and "sciencedirect.com" not in parsed_u.netloc:
+                                candidate_pdf_urls.append(f"{base_origin}/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true")
+
+                            proxied_candidate = auth_setup.get_proxied_url(official_pdf_url, institution)
+                            if proxied_candidate not in candidate_pdf_urls:
+                                candidate_pdf_urls.append(proxied_candidate)
+
+                            html_fallback_detected = False
+                            last_html_body = None
+
+                            for target_pdf_url in candidate_pdf_urls:
+                                print(f"Navigating browser to direct ScienceDirect PDF endpoint: {target_pdf_url}")
+                                try:
+                                    download = None
+                                    try:
+                                        with page.expect_download(timeout=25000) as download_info:
+                                            try:
+                                                page.goto(target_pdf_url, timeout=25000)
+                                            except Exception:
+                                                # page.goto typically raises net::ERR_ABORTED when navigation triggers a browser download
+                                                pass
+                                        download = download_info.value
+                                    except Exception as dl_err:
+                                        print(f"  Download event listener did not capture download for {target_pdf_url}: {dl_err}")
+
+                                    raw_bytes = None
+                                    if download:
+                                        temp_pdf = out_dir / f".tmp_{safe_name}.pdf"
                                         try:
-                                            resp = context.request.get(iframe_url, timeout=30000)
+                                            download.save_as(str(temp_pdf))
+                                            if temp_pdf.is_file():
+                                                raw_bytes = temp_pdf.read_bytes()
+                                        except Exception as save_err:
+                                            print(f"  Download save_as error: {save_err}")
+                                        finally:
+                                            temp_pdf.unlink(missing_ok=True)
+
+                                        if not raw_bytes and hasattr(download, "path"):
+                                            try:
+                                                dp = download.path()
+                                                if dp and Path(dp).is_file():
+                                                    raw_bytes = Path(dp).read_bytes()
+                                            except Exception:
+                                                pass
+
+                                    if raw_bytes:
+                                        prefix = raw_bytes[:500].decode("utf-8", errors="replace").strip().lower()
+                                        if "<html" in prefix or "<!doctype html" in prefix:
+                                            html_fallback_detected = True
+                                            last_html_body = raw_bytes
+                                            print(f"  Warning: Download from {target_pdf_url} returned an HTML document ({len(raw_bytes):,} bytes).")
+                                            continue
+
+                                        # Validate %PDF- magic bytes header
+                                        if not raw_bytes.startswith(b"%PDF-"):
+                                            raise InvalidPDFError(
+                                                f"ScienceDirect downloaded file missing %PDF- magic bytes header. Starting bytes: {raw_bytes[:20]!r}"
+                                            )
+
+                                        validate_pdf_stream(raw_bytes)
+                                        pdf_bytes = raw_bytes
+                                        print(f"✓ Intercepted and validated binary PDF stream via expect_download ({len(pdf_bytes):,} bytes).")
+                                        break
+                                    else:
+                                        # No download captured; inspect page for institutional login challenge or HTML fallback
+                                        if auth_setup.is_login_or_challenge(page=page, institution=institution):
+                                            raise auth_setup.InstitutionalAuthChallenge(
+                                                message="ScienceDirect direct PDF endpoint redirected to institutional login wall",
+                                                target_url=target_pdf_url
+                                            )
+
+                                        try:
+                                            page_html = page.content()
+                                            prefix = page_html[:500].strip().lower()
+                                            if "<html" in prefix or "<!doctype html" in prefix:
+                                                html_fallback_detected = True
+                                                last_html_body = page_html.encode("utf-8")
+                                                print(f"  Warning: Navigation to {target_pdf_url} rendered an HTML fallback page.")
+                                        except Exception:
+                                            pass
+
+                                except auth_setup.InstitutionalAuthChallenge:
+                                    raise
+                                except InvalidPDFError:
+                                    raise
+                                except Exception as fetch_err:
+                                    print(f"  Direct PDF fetch note for {target_pdf_url}: {fetch_err}")
+
+                            # If no valid PDF bytes retrieved and an HTML fallback page was returned, raise InvalidPDFError
+                            if not pdf_bytes and html_fallback_detected:
+                                raise InvalidPDFError(
+                                    f"ScienceDirect returned an HTML fallback page ({len(last_html_body):,} bytes) rather than valid PDF bytes. "
+                                    f"Official endpoint: {official_pdf_url}"
+                                )
+
+                    else:
+                        # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
+                        # Strategy 1: Try authenticated direct PDF endpoint
+                        for candidate in direct_candidates:
+                            print(f"Attempting direct PDF retrieval via {candidate[:80]}...")
+                            try:
+                                resp = context.request.get(candidate, timeout=25000)
+                                if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
+                                    raise auth_setup.InstitutionalAuthChallenge(
+                                        message="Direct candidate endpoint redirected to institutional login wall",
+                                        target_url=candidate
+                                    )
+                                if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                    print(f"✓ Direct PDF endpoint returned {len(resp.body()):,} bytes.")
+                                    pdf_bytes = resp.body()
+                                    break
+                            except auth_setup.InstitutionalAuthChallenge:
+                                raise
+                            except Exception as e:
+                                print(f"  Direct probe note: {e}")
+
+                        # Strategy 2: Navigate proxied page and capture viewer/iframe or download trigger
+                        if not pdf_bytes:
+                            print(f"Navigating to proxied article page: {proxied_article_url}")
+                            page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
+                            page.wait_for_timeout(3000)
+
+                            if auth_setup.is_login_or_challenge(page=page, institution=institution):
+                                raise auth_setup.InstitutionalAuthChallenge(
+                                    message="Institutional login wall or 2FA prompt detected during publisher navigation",
+                                    target_url=proxied_article_url
+                                )
+
+                            # Check if current response or page is directly a PDF
+                            try:
+                                content_type = page.evaluate("() => document.contentType")
+                                if content_type == "application/pdf":
+                                    resp = context.request.get(page.url, timeout=25000)
+                                    if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                        pdf_bytes = resp.body()
+                            except Exception:
+                                pass
+
+                            # Check for embedded PDF iframe (e.g., Wiley viewer: iframe#pdf-iframe)
+                            if not pdf_bytes:
+                                for selector in ["iframe#pdf-iframe", "iframe[src*='pdf']", "embed[type='application/pdf']", "iframe"]:
+                                    el = page.query_selector(selector)
+                                    if el:
+                                        src = el.get_attribute("src")
+                                        if src and ("pdf" in src.lower() or "direct" in src.lower()):
+                                            iframe_url = src if src.startswith("http") else urljoin(page.url, src)
+                                            print(f"Found embedded PDF source: {iframe_url[:80]}...")
+                                            try:
+                                                resp = context.request.get(iframe_url, timeout=30000)
+                                                if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
+                                                    raise auth_setup.InstitutionalAuthChallenge(
+                                                        message="Embedded PDF frame redirected to institutional login wall",
+                                                        target_url=iframe_url
+                                                    )
+                                                if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                                    pdf_bytes = resp.body()
+                                                    break
+                                            except auth_setup.InstitutionalAuthChallenge:
+                                                raise
+                                            except Exception as e:
+                                                print(f"  Iframe fetch note: {e}")
+
+                            # Check for candidate PDF links on the page (HighWire, Silverchair, Wiley, Springer, etc.)
+                            if not pdf_bytes:
+                                try:
+                                    links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
+                                    sorted_links = sorted(
+                                        [l for l in links if l and l.startswith("http")],
+                                        key=lambda x: (
+                                            0 if ".full.pdf" in x.lower() else
+                                            1 if "pdfdirect" in x.lower() else
+                                            2 if x.lower().endswith(".pdf") else
+                                            3 if "/pdf/" in x.lower() else 4
+                                        )
+                                    )
+                                    for href in sorted_links:
+                                        print(f"Testing candidate PDF link: {href[:80]}...")
+                                        try:
+                                            resp = context.request.get(href, timeout=30000)
                                             if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
                                                 raise auth_setup.InstitutionalAuthChallenge(
-                                                    message="Embedded PDF frame redirected to institutional login wall",
-                                                    target_url=iframe_url
+                                                    message="Candidate PDF link redirected to institutional login wall",
+                                                    target_url=href
                                                 )
                                             if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                                print(f"✓ Downloaded PDF via link ({len(resp.body()):,} bytes).")
                                                 pdf_bytes = resp.body()
                                                 break
                                         except auth_setup.InstitutionalAuthChallenge:
                                             raise
                                         except Exception as e:
-                                            print(f"  Iframe fetch note: {e}")
+                                            print(f"  Link probe note: {e}")
+                                except auth_setup.InstitutionalAuthChallenge:
+                                    raise
+                                except Exception as e:
+                                    print(f"  Link evaluation note: {e}")
 
-                        # Check for candidate PDF links on the page (HighWire, Silverchair, Wiley, Springer, etc.)
-                        if not pdf_bytes:
-                            try:
-                                links = page.eval_on_selector_all("a[href*='pdf']", "elements => elements.map(e => e.href)")
-                                sorted_links = sorted(
-                                    [l for l in links if l and l.startswith("http")],
-                                    key=lambda x: (
-                                        0 if ".full.pdf" in x.lower() else
-                                        1 if "pdfdirect" in x.lower() else
-                                        2 if x.lower().endswith(".pdf") else
-                                        3 if "/pdf/" in x.lower() else 4
-                                    )
-                                )
-                                for href in sorted_links:
-                                    print(f"Testing candidate PDF link: {href[:80]}...")
-                                    try:
-                                        resp = context.request.get(href, timeout=30000)
-                                        if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
-                                            raise auth_setup.InstitutionalAuthChallenge(
-                                                message="Candidate PDF link redirected to institutional login wall",
-                                                target_url=href
-                                            )
-                                        if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                            print(f"✓ Downloaded PDF via link ({len(resp.body()):,} bytes).")
-                                            pdf_bytes = resp.body()
-                                            break
-                                    except auth_setup.InstitutionalAuthChallenge:
-                                        raise
-                                    except Exception as e:
-                                        print(f"  Link probe note: {e}")
-                            except auth_setup.InstitutionalAuthChallenge:
-                                raise
-                            except Exception as e:
-                                print(f"  Link evaluation note: {e}")
-
-                        # Check for standard PDF download buttons/links with browser download event
-                        if not pdf_bytes:
-                            for btn_sel in MAJOR_PUBLISHER_PDF_SELECTORS:
-                                btn = page.query_selector(btn_sel)
-                                if btn:
-                                    href = btn.get_attribute("href")
-                                    if href:
-                                        target_href = href if href.startswith("http") else urljoin(page.url, href)
-                                        print(f"Attempting download link: {target_href[:80]}...")
+                            # Check for standard PDF download buttons/links with browser download event
+                            if not pdf_bytes:
+                                for btn_sel in MAJOR_PUBLISHER_PDF_SELECTORS:
+                                    btn = page.query_selector(btn_sel)
+                                    if btn:
+                                        href = btn.get_attribute("href")
+                                        if href:
+                                            target_href = href if href.startswith("http") else urljoin(page.url, href)
+                                            print(f"Attempting download link: {target_href[:80]}...")
+                                            try:
+                                                resp = context.request.get(target_href, headers={"Referer": page.url}, timeout=30000)
+                                                if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
+                                                    raise auth_setup.InstitutionalAuthChallenge(
+                                                        message="Download button link redirected to institutional login wall",
+                                                        target_url=target_href
+                                                    )
+                                                if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                                                    pdf_bytes = resp.body()
+                                                    break
+                                            except auth_setup.InstitutionalAuthChallenge:
+                                                raise
+                                            except Exception:
+                                                pass
                                         try:
-                                            resp = context.request.get(target_href, headers={"Referer": page.url}, timeout=30000)
-                                            if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
-                                                raise auth_setup.InstitutionalAuthChallenge(
-                                                    message="Download button link redirected to institutional login wall",
-                                                    target_url=target_href
-                                                )
-                                            if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                                pdf_bytes = resp.body()
-                                                break
-                                        except auth_setup.InstitutionalAuthChallenge:
-                                            raise
+                                            with page.expect_download(timeout=10000) as download_info:
+                                                btn.click()
+                                            download = download_info.value
+                                            download.save_as(str(pdf_path))
+                                            if pdf_path.is_file():
+                                                downloaded_bytes = pdf_path.read_bytes()
+                                                if is_valid_pdf_stream(downloaded_bytes):
+                                                    print(f"✓ Download triggered via browser event ({len(downloaded_bytes):,} bytes).")
+                                                    pdf_bytes = downloaded_bytes
+                                                    break
+                                                else:
+                                                    pdf_path.unlink(missing_ok=True)
                                         except Exception:
                                             pass
-                                    try:
-                                        with page.expect_download(timeout=10000) as download_info:
-                                            btn.click()
-                                        download = download_info.value
-                                        download.save_as(str(pdf_path))
-                                        if pdf_path.is_file():
-                                            downloaded_bytes = pdf_path.read_bytes()
-                                            if is_valid_pdf_stream(downloaded_bytes):
-                                                print(f"✓ Download triggered via browser event ({len(downloaded_bytes):,} bytes).")
-                                                pdf_bytes = downloaded_bytes
-                                                break
-                                            else:
-                                                pdf_path.unlink(missing_ok=True)
-                                    except Exception:
-                                        pass
-                                    if auth_setup.is_login_or_challenge(page=page, institution=institution):
-                                        raise auth_setup.InstitutionalAuthChallenge(
-                                            message="Download click redirected to institutional login wall",
-                                            target_url=page.url
-                                        )
+                                        if auth_setup.is_login_or_challenge(page=page, institution=institution):
+                                            raise auth_setup.InstitutionalAuthChallenge(
+                                                message="Download click redirected to institutional login wall",
+                                                target_url=page.url
+                                            )
 
-                browser.close()
+                    browser.close()
 
-            if pdf_bytes:
-                validate_pdf_stream(pdf_bytes)
-                pdf_path.write_bytes(pdf_bytes)
+                if pdf_bytes:
+                    validate_pdf_stream(pdf_bytes)
+                    pdf_path.write_bytes(pdf_bytes)
 
-            break
+                break
 
-        except auth_setup.InstitutionalAuthChallenge as challenge_exc:
-            if attempt < max_auth_attempts - 1:
-                print(f"\n{auth_setup.AUTH_CHALLENGE_PROMPT}\n")
-                challenge_url = challenge_exc.target_url or proxied_article_url
-                save_destination = state_path or auth_setup.DEFAULT_STATE_PATH
-                auth_setup.authenticate_interactive(
-                    institution=institution,
-                    target_url=challenge_url,
-                    state_path=save_destination,
-                    headless=False
-                )
-                session_file = auth_setup.get_existing_state_path(state_path)
-                print("✓ Fresh institutional session captured. Resuming paper retrieval pipeline...")
-                continue
-            else:
-                raise
+            except auth_setup.InstitutionalAuthChallenge as challenge_exc:
+                if attempt < max_auth_attempts - 1:
+                    print(f"\n{auth_setup.AUTH_CHALLENGE_PROMPT}\n")
+                    challenge_url = challenge_exc.target_url or proxied_article_url
+                    save_destination = state_path or auth_setup.DEFAULT_STATE_PATH
+                    auth_setup.authenticate_interactive(
+                        institution=institution,
+                        target_url=challenge_url,
+                        state_path=save_destination,
+                        headless=False
+                    )
+                    session_file = auth_setup.get_existing_state_path(state_path)
+                    print("✓ Fresh institutional session captured. Resuming paper retrieval pipeline...")
+                    continue
+                else:
+                    raise
 
-    if pdf_bytes and not pdf_path.is_file():
-        validate_pdf_stream(pdf_bytes)
-        pdf_path.write_bytes(pdf_bytes)
+        if pdf_bytes and not pdf_path.is_file():
+            validate_pdf_stream(pdf_bytes)
+            pdf_path.write_bytes(pdf_bytes)
 
-    if not pdf_path.is_file():
-        raise InvalidPDFError(f"Failed to retrieve valid PDF for DOI {clean_doi}: No PDF file was saved.")
+        if not pdf_path.is_file():
+            raise InvalidPDFError(f"Failed to retrieve valid PDF for DOI {clean_doi}: No PDF file was saved.")
 
-    # Validation & Quality Check
-    # Verify that the retrieved file is a valid binary PDF stream (checking that the file magic bytes start with %PDF- and that the file size is greater than 100 KB)
-    # before passing it to mechanical validation and Markdown conversion.
-    # If an HTML/print fallback or invalid stub is produced, raise a clean exception rather than saving it as paper.pdf.
-    try:
-        validate_pdf_stream(pdf_path)
-    except InvalidPDFError as val_err:
-        pdf_path.unlink(missing_ok=True)
-        raise InvalidPDFError(f"Validation failed for retrieved file {pdf_path.name}: {val_err}") from val_err
+        # Validation & Quality Check
+        # Verify that the retrieved file is a valid binary PDF stream (checking that the file magic bytes start with %PDF- and that the file size is greater than 100 KB)
+        # before passing it to mechanical validation and Markdown conversion.
+        # If an HTML/print fallback or invalid stub is produced, raise a clean exception rather than saving it as paper.pdf.
+        try:
+            validate_pdf_stream(pdf_path)
+        except InvalidPDFError as val_err:
+            pdf_path.unlink(missing_ok=True)
+            raise InvalidPDFError(f"Validation failed for retrieved file {pdf_path.name}: {val_err}") from val_err
 
-    # Verify PDF
-    report, _ = source_files.inspect_file(pdf_path, expected="pdf")
-    if report.get("mechanical_status") != "pass":
-        pdf_path.unlink(missing_ok=True)
-        raise RuntimeError(f"Retrieved file failed mechanical PDF verification: {report.get('errors')}")
+        # Verify PDF
+        report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+        if report.get("mechanical_status") != "pass":
+            pdf_path.unlink(missing_ok=True)
+            raise RuntimeError(f"Retrieved file failed mechanical PDF verification: {report.get('errors')}")
 
-    print(f"✓ Step A Complete: Verified PDF saved to {pdf_path} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
-    return pdf_path, report
+        print(f"✓ Step A Complete: Verified PDF saved to {pdf_path} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
+        return pdf_path, report
+    except (InvalidPDFError, RuntimeError, auth_setup.InstitutionalAuthChallenge, Exception) as err:
+        target_endpoint_url = getattr(err, "endpoint_url", None) or (
+            (proxied_article_url if 'proxied_article_url' in locals() else None) or
+            (target_article_url if 'target_article_url' in locals() else None) or
+            direct_url or
+            f"https://doi.org/{clean_doi}"
+        )
+        setattr(err, "endpoint_url", target_endpoint_url)
+
+        if not is_batch and interactive_fallback and headless:
+            print(f"\n⚡ Headless retrieval failure on DOI {clean_doi}: {err}")
+            print("Switching from headless to interactive headed mode...")
+            return interactive_headed_download(
+                doi=clean_doi,
+                target_url=target_endpoint_url,
+                pdf_path=pdf_path,
+                session_file=session_file if 'session_file' in locals() else None,
+                pii=sd_pii if 'sd_pii' in locals() else pii,
+                safe_name=safe_name,
+                institution=institution
+            )
+        else:
+            w_dir = Path(output_dir or ROOT / "downloads").resolve().parent / "working"
+            log_failure(
+                doi=clean_doi,
+                failure_stage="step_a_download",
+                error=err,
+                endpoint_url=target_endpoint_url,
+                working_dir=w_dir
+            )
+            setattr(err, "_already_logged", True)
+            raise
 
 
 def step_b_convert_to_markdown(pdf_path, metadata, source_text_dir=None):
@@ -1646,10 +1915,14 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
                    output_dir=None, source_text_dir=None, zotero_dir=None,
                    zotero_collection=None,
                    skip_download=False, skip_markdown=False, skip_zotero=False,
-                   skip_oa=False, headless=True, interactive_fallback=True):
+                   skip_oa=False, headless=True, interactive_fallback=True,
+                   is_batch=False, working_dir=None):
     """Execute the end-to-end pipeline (Download -> Markdown -> Zotero) for one target."""
     inst = institution or auth_setup.get_active_institution()
     metadata = {}
+    batch_mode = is_batch or bool(ris_record)
+    effective_interactive_fallback = False if batch_mode else interactive_fallback
+    w_dir = Path(working_dir or ROOT / "working").resolve()
 
     if ris_record:
         metadata.update(ris_record)
@@ -1706,44 +1979,82 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
     print("=" * 70)
 
     # Step A: Download
-    if skip_download and pdf_dest.is_file():
-        print(f"Step A (Download) skipped: Using existing file at {pdf_dest}")
-        validate_pdf_stream(pdf_dest)
-        pdf_path = pdf_dest
-    else:
-        pdf_path, _ = step_a_download_paper(
-            doi=target_doi,
-            institution=inst,
-            state_path=state_path,
-            output_dir=output_dir,
-            direct_url=metadata.get("url"),
-            pii=metadata.get("pii"),
-            headless=headless,
-            skip_oa=skip_oa,
-            interactive_fallback=interactive_fallback
-        )
+    try:
+        if skip_download and pdf_dest.is_file():
+            print(f"Step A (Download) skipped: Using existing file at {pdf_dest}")
+            validate_pdf_stream(pdf_dest)
+            pdf_path = pdf_dest
+        else:
+            pdf_path, _ = step_a_download_paper(
+                doi=target_doi,
+                institution=inst,
+                state_path=state_path,
+                output_dir=output_dir,
+                direct_url=metadata.get("url"),
+                pii=metadata.get("pii"),
+                headless=headless,
+                skip_oa=skip_oa,
+                interactive_fallback=effective_interactive_fallback,
+                is_batch=batch_mode
+            )
+    except Exception as exc:
+        if not getattr(exc, "_already_logged", False):
+            endpoint_url = getattr(exc, "endpoint_url", None) or metadata.get("url") or f"https://doi.org/{target_doi}"
+            log_failure(
+                doi=target_doi,
+                failure_stage="step_a_download",
+                error=exc,
+                endpoint_url=endpoint_url,
+                working_dir=w_dir
+            )
+            setattr(exc, "_already_logged", True)
+        raise
 
     # Step B: Markdown Conversion
     markdown_path = None
     if not skip_markdown:
-        markdown_path = step_b_convert_to_markdown(
-            pdf_path=pdf_path,
-            metadata=metadata,
-            source_text_dir=source_text_dir
-        )
+        try:
+            markdown_path = step_b_convert_to_markdown(
+                pdf_path=pdf_path,
+                metadata=metadata,
+                source_text_dir=source_text_dir
+            )
+        except Exception as exc:
+            if not getattr(exc, "_already_logged", False):
+                log_failure(
+                    doi=target_doi,
+                    failure_stage="step_b_markdown",
+                    error=exc,
+                    endpoint_url=metadata.get("url") or f"https://doi.org/{target_doi}",
+                    working_dir=w_dir
+                )
+                setattr(exc, "_already_logged", True)
+            raise
     else:
         print("Step B (Markdown Conversion) skipped by user flag.")
 
     # Step C: Zotero Sync / Intake
     zotero_result = None
     if not skip_zotero and markdown_path:
-        zotero_result = step_c_sync_or_package_zotero(
-            pdf_path=pdf_path,
-            markdown_path=markdown_path,
-            metadata=metadata,
-            zotero_dir=zotero_dir,
-            collection_name=zotero_collection
-        )
+        try:
+            zotero_result = step_c_sync_or_package_zotero(
+                pdf_path=pdf_path,
+                markdown_path=markdown_path,
+                metadata=metadata,
+                zotero_dir=zotero_dir,
+                collection_name=zotero_collection
+            )
+        except Exception as exc:
+            if not getattr(exc, "_already_logged", False):
+                log_failure(
+                    doi=target_doi,
+                    failure_stage="step_c_zotero",
+                    error=exc,
+                    endpoint_url=metadata.get("url") or f"https://doi.org/{target_doi}",
+                    working_dir=w_dir
+                )
+                setattr(exc, "_already_logged", True)
+            raise
     else:
         print("Step C (Zotero Sync) skipped.")
 
@@ -1788,9 +2099,38 @@ def main():
             print(f"No records found in RIS file: {args.ris}", file=sys.stderr)
             return 1
         print(f"Found {len(records)} citation record(s) in {args.ris}.")
+        failed_count = 0
         for rec in records:
+            try:
+                process_target(
+                    ris_record=rec,
+                    institution=inst,
+                    state_path=args.state_path,
+                    output_dir=args.output_dir,
+                    source_text_dir=args.source_text_dir,
+                    zotero_dir=args.zotero_dir,
+                    zotero_collection=args.zotero_collection,
+                    skip_download=args.skip_download,
+                    skip_markdown=args.skip_markdown,
+                    skip_zotero=args.skip_zotero,
+                    skip_oa=args.skip_oa,
+                    headless=not args.no_headless,
+                    interactive_fallback=False,
+                    is_batch=True
+                )
+            except Exception as e:
+                failed_count += 1
+                rec_doi = rec.get("doi") or "unknown"
+                print(f"Batch processing error for {rec_doi}: {e}", file=sys.stderr)
+
+        if failed_count > 0:
+            print(f"\nBatch processing completed with {failed_count} failure(s). Check working/failed_papers.log and working/error_audit.jsonl.")
+            return 1
+        return 0
+    else:
+        try:
             process_target(
-                ris_record=rec,
+                doi=args.doi,
                 institution=inst,
                 state_path=args.state_path,
                 output_dir=args.output_dir,
@@ -1802,26 +2142,13 @@ def main():
                 skip_zotero=args.skip_zotero,
                 skip_oa=args.skip_oa,
                 headless=not args.no_headless,
-                interactive_fallback=args.interactive_fallback
+                interactive_fallback=args.interactive_fallback,
+                is_batch=False
             )
-    else:
-        process_target(
-            doi=args.doi,
-            institution=inst,
-            state_path=args.state_path,
-            output_dir=args.output_dir,
-            source_text_dir=args.source_text_dir,
-            zotero_dir=args.zotero_dir,
-            zotero_collection=args.zotero_collection,
-            skip_download=args.skip_download,
-            skip_markdown=args.skip_markdown,
-            skip_zotero=args.skip_zotero,
-            skip_oa=args.skip_oa,
-            headless=not args.no_headless,
-            interactive_fallback=args.interactive_fallback
-        )
-
-    return 0
+        except Exception as e:
+            print(f"Processing error: {e}", file=sys.stderr)
+            return 1
+        return 0
 
 
 if __name__ == "__main__":
