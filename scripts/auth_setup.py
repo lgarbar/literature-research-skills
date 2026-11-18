@@ -21,6 +21,14 @@ ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_PATH = ROOT / "state" / "storage_state.json"
 COMPAT_STATE_PATH = ROOT / "institutional_auth.json"
 
+DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+STEALTH_BROWSER_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-infobars",
+    "--disable-dev-shm-usage"
+]
+
 AUTH_CHALLENGE_PROMPT = "Institutional session expired or 2FA required. Please complete authentication in the browser window..."
 
 SSO_HOST_PATTERNS = [
@@ -267,7 +275,7 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            args=list(STEALTH_BROWSER_ARGS)
         )
         context_kwargs = {}
         existing_state = get_existing_state_path(state_path)
@@ -280,7 +288,7 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
 
         context = browser.new_context(
             **context_kwargs,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent=DEFAULT_DESKTOP_USER_AGENT
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
@@ -387,11 +395,11 @@ def validate_session(state_path=None, institution=None, test_url=None, interacti
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                args=list(STEALTH_BROWSER_ARGS)
             )
             context = browser.new_context(
                 storage_state=str(session_file),
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                user_agent=DEFAULT_DESKTOP_USER_AGENT
             )
             page = context.new_page()
             try:

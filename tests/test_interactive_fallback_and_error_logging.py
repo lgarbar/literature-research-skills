@@ -141,9 +141,22 @@ class TestInteractiveHeadedFallbackAndErrorLogging(unittest.TestCase):
                     session_file=self.state_file
                 )
 
-                # Verify browser was launched with headless=False
+                # Verify browser was launched with headless=False and stealth arguments
                 mock_p.chromium.launch.assert_called_once()
                 self.assertFalse(mock_p.chromium.launch.call_args[1].get("headless"))
+                expected_stealth_args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-infobars",
+                    "--disable-dev-shm-usage"
+                ]
+                self.assertEqual(mock_p.chromium.launch.call_args[1].get("args"), expected_stealth_args)
+
+                # Verify context user-agent matches a standard desktop Chrome browser (not headless)
+                ua = mock_browser.new_context.call_args[1].get("user_agent", "")
+                self.assertIn("Mozilla/5.0", ua)
+                self.assertIn("Chrome/", ua)
+                self.assertNotIn("HeadlessChrome", ua)
 
                 # Verify the prompt text presented to the user
                 self.assertIsNotNone(prompt_captured)

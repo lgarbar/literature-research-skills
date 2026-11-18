@@ -105,6 +105,14 @@ def is_valid_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES):
         return False
 
 
+DEFAULT_DESKTOP_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+STEALTH_BROWSER_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-infobars",
+    "--disable-dev-shm-usage"
+]
+
 ANTI_BOT_PROMPT = "Automated retrieval blocked by anti-bot challenge. Please complete the challenge or download the PDF manually in the browser, then press Enter to resume..."
 
 
@@ -745,11 +753,11 @@ def download_oa_via_unauthenticated_browser(candidate_urls, pdf_path, headless=T
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            args=list(STEALTH_BROWSER_ARGS)
         )
         context = browser.new_context(
             accept_downloads=True,
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            user_agent=DEFAULT_DESKTOP_USER_AGENT,
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
@@ -880,11 +888,16 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-infobars",
+                "--disable-dev-shm-usage"
+            ]
         )
         context_kwargs = {
             "accept_downloads": True,
-            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "user_agent": DEFAULT_DESKTOP_USER_AGENT,
         }
         if s_file and Path(s_file).is_file():
             context_kwargs["storage_state"] = str(s_file)
@@ -1148,12 +1161,12 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                 with sync_playwright() as p:
                     browser = p.chromium.launch(
                         headless=current_headless,
-                        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                        args=list(STEALTH_BROWSER_ARGS)
                     )
                     context = browser.new_context(
                         storage_state=str(session_file),
                         accept_downloads=True,
-                        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        user_agent=DEFAULT_DESKTOP_USER_AGENT,
                     )
                     context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                     page = context.new_page()
