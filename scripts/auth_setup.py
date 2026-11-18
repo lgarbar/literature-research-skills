@@ -2,7 +2,7 @@
 """Institutional Library Authentication & Session Manager using Playwright.
 
 Dedicated to handling one-time institutional SSO authentication, cookie capture,
-session persistence, and dynamic EZproxy URL rewriting.
+session persistence, dynamic EZproxy URL rewriting, and resilient 2FA/SSO fallback.
 """
 import argparse
 from datetime import datetime, timezone
@@ -20,6 +20,112 @@ UNIVERSITIES_FILE = ROOT / "config" / "universities.json"
 ENV_FILE = ROOT / ".env"
 DEFAULT_STATE_PATH = ROOT / "state" / "storage_state.json"
 COMPAT_STATE_PATH = ROOT / "institutional_auth.json"
+
+AUTH_CHALLENGE_PROMPT = "Institutional session expired or 2FA required. Please complete authentication in the browser window..."
+
+SSO_HOST_PATTERNS = [
+    "duo.",
+    "duosecurity.com",
+    "okta.com",
+    "onevu.",
+    "shibboleth",
+    "/saml",
+    "/sso",
+    "/cas/",
+    "/idp/",
+    "login.microsoftonline.com",
+    "pingidentity",
+    "openathens.net",
+    "auth.",
+]
+
+CHALLENGE_TEXT_PATTERNS = [
+    "duo security",
+    "duo push",
+    "check for a duo push",
+    "duo-universal-prompt",
+    "institutional session expired",
+    "session has expired",
+    "session expired",
+    "session timed out",
+    "two-factor authentication",
+    "multi-factor authentication",
+    "2-step verification",
+    "verify your identity",
+    "enter your user name and password",
+    "enter your username and password",
+    "sign in with your organizational account",
+    "log in to vanderbilt university",
+    "single sign-on",
+]
+
+
+class InstitutionalAuthChallenge(Exception):
+    """Raised when an institutional login wall, SSO redirect, or 2FA challenge is encountered."""
+
+    def __init__(self, message="Institutional session expired or 2FA required.", target_url=None):
+        super().__init__(message)
+        self.message = message
+        self.target_url = target_url
+
+
+def is_login_or_challenge(url=None, html=None, page=None, institution=None):
+    """Detect if the given URL, page content, or Playwright page represents an institutional login wall or 2FA/SSO challenge."""
+    inst = institution or get_active_institution()
+    login_portal = (inst.get("login_portal") or "").lower()
+
+    current_url = ""
+    if page:
+        try:
+            current_url = (page.url or "").lower()
+        except Exception:
+            pass
+    elif url:
+        current_url = url.lower()
+
+    if current_url:
+        if any(pat in current_url for pat in SSO_HOST_PATTERNS):
+            return True
+        if login_portal and login_portal in current_url:
+            return True
+        if "login?url=" in current_url or ("/login" in current_url and ("proxy" in current_url or "library" in current_url or "ezproxy" in current_url)):
+            return True
+
+    if page:
+        try:
+            # Check for Duo iframe or widget
+            duo_selectors = [
+                "iframe#duo_iframe",
+                "iframe[src*='duosecurity']",
+                "iframe[src*='duo.com']",
+                "duo-universal-prompt",
+                "#duo-parent",
+                "[data-duo-host]",
+            ]
+            for sel in duo_selectors:
+                if page.locator(sel).count() > 0:
+                    return True
+
+            has_password = page.locator("input[type='password']").count() > 0
+            if has_password:
+                title = (page.title() or "").lower()
+                if any(k in current_url or k in title for k in ["login", "signin", "sign-in", "auth", "sso", "saml", "idp", "proxy", "vanderbilt", "okta", "duo"]):
+                    return True
+
+            body_text = (page.inner_text("body") or "").lower()
+            if any(term in body_text for term in CHALLENGE_TEXT_PATTERNS):
+                if has_password or any(pat in current_url for pat in SSO_HOST_PATTERNS) or "login" in current_url or "proxy" in current_url or len(body_text) < 5000:
+                    return True
+        except Exception:
+            pass
+
+    if html:
+        lower_html = html.lower()
+        if any(term in lower_html for term in CHALLENGE_TEXT_PATTERNS):
+            if "type=\"password\"" in lower_html or "type='password'" in lower_html or any(pat in current_url for pat in SSO_HOST_PATTERNS) or "login" in current_url:
+                return True
+
+    return False
 
 
 def load_env_vars():
@@ -128,7 +234,7 @@ def get_existing_state_path(custom_path=None):
     return None
 
 
-def authenticate_interactive(institution=None, target_url=None, state_path=None, headless=False, timeout_sec=180):
+def authenticate_interactive(institution=None, target_url=None, state_path=None, headless=False, timeout_sec=300):
     """Launch Playwright browser for user authentication and save storage state."""
     try:
         from playwright.sync_api import sync_playwright
@@ -154,8 +260,15 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     print(f"Session Save Path:  {save_path}")
     print("-" * 70)
 
+    if not headless:
+        print(f"\n{AUTH_CHALLENGE_PROMPT}")
+        print("   (The session will save automatically once login completes, or you can press [ENTER] when done)\n")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
         context_kwargs = {}
         existing_state = get_existing_state_path(state_path)
         if existing_state:
@@ -165,19 +278,20 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
             except Exception:
                 pass
 
-        context = browser.new_context(**context_kwargs)
+        context = browser.new_context(
+            **context_kwargs,
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
 
         print(f"Opening browser to: {destination_url}")
         try:
-            page.goto(destination_url, timeout=30000)
+            page.goto(destination_url, timeout=45000)
         except Exception as e:
             print(f"Navigation note: {e}")
 
         if not headless:
-            print("\n👉 Please complete your institutional login and MFA in the browser window.")
-            print("   (The session will save automatically once login completes, or you can press [ENTER] when done)")
-
             start_time = time.time()
             initial_url = page.url
             while time.time() - start_time < timeout_sec:
@@ -189,21 +303,22 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
                     current_url = page.url
                     cookies = context.cookies()
 
-                    # Detect if user has successfully navigated through SSO/SAML
-                    is_sso = any(auth_host in current_url.lower() for auth_host in ["onevu.", "okta.com", "duo.", "shibboleth", "/saml", "/sso"])
+                    # Detect if user has successfully navigated through SSO/SAML/Duo
+                    challenge_active = is_login_or_challenge(page=page, institution=inst)
                     has_auth_cookies = any("ezp" in c["name"].lower() or "proxy" in c["name"].lower() or "session" in c["name"].lower() for c in cookies)
 
-                    if not is_sso and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or "vanderbilt" in current_url):
+                    if not challenge_active and current_url != initial_url and (has_auth_cookies or "proxy" in current_url or "vanderbilt" in current_url):
                         print(f"\n✓ Detected authenticated destination: {current_url}")
                         page.wait_for_timeout(2000)
                         break
 
                     # Check for terminal ENTER key without blocking
                     try:
-                        if select.select([sys.stdin], [], [], 0)[0]:
-                            sys.stdin.readline()
-                            print("\nConfirmation received from terminal.")
-                            break
+                        if sys.stdin and not sys.stdin.closed:
+                            if select.select([sys.stdin], [], [], 0)[0]:
+                                sys.stdin.readline()
+                                print("\nConfirmation received from terminal.")
+                                break
                     except Exception:
                         pass
 
@@ -230,8 +345,89 @@ def authenticate_interactive(institution=None, target_url=None, state_path=None,
     return True
 
 
-def check_session(state_path=None):
-    """Check if saved session state exists and report cookie count."""
+# Backward-compatible convenience alias
+login = authenticate_interactive
+
+
+def validate_session(state_path=None, institution=None, test_url=None, interactive_fallback=True, timeout_sec=20):
+    """Validate saved institutional session state.
+
+    If session state is missing, or if loading an institutional resource
+    hits a login wall or 2FA prompt and fails headless cookies, catch the state,
+    reopen Playwright in headed mode (headless=False), notify user in the terminal,
+    pause until authentication completes, and save the fresh session state.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("Error: Playwright is not installed.", file=sys.stderr)
+        return False
+
+    inst = institution or get_active_institution()
+    session_file = get_existing_state_path(state_path)
+    save_path = Path(state_path or DEFAULT_STATE_PATH).resolve()
+
+    if not session_file:
+        print(f"No saved session found at {save_path}.")
+        if interactive_fallback:
+            print(f"\n{AUTH_CHALLENGE_PROMPT}\n")
+            return authenticate_interactive(
+                institution=inst,
+                target_url=test_url,
+                state_path=save_path,
+                headless=False,
+            )
+        return False
+
+    check_url = test_url or inst.get("login_portal") or inst.get("library_portal")
+    print(f"Validating institutional session against {check_url} in headless mode...")
+
+    hit_challenge = False
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+            )
+            context = browser.new_context(
+                storage_state=str(session_file),
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+            try:
+                page.goto(check_url, timeout=timeout_sec * 1000, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                if is_login_or_challenge(page=page, institution=inst):
+                    hit_challenge = True
+            except Exception as e:
+                print(f"Validation navigation note: {e}")
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"Validation browser note: {e}")
+        hit_challenge = True
+
+    if hit_challenge:
+        print("\nSession validation detected institutional login wall / 2FA challenge.")
+        if interactive_fallback:
+            print(f"\n{AUTH_CHALLENGE_PROMPT}\n")
+            return authenticate_interactive(
+                institution=inst,
+                target_url=test_url or check_url,
+                state_path=save_path,
+                headless=False,
+            )
+        return False
+
+    print("✓ Saved institutional session is valid.")
+    return True
+
+
+def check_session(state_path=None, validate=False, interactive_fallback=True, institution=None):
+    """Check if saved session state exists and report cookie count. Optionally validates live."""
+    if validate:
+        return validate_session(state_path=state_path, institution=institution, interactive_fallback=interactive_fallback)
+
     existing_state = get_existing_state_path(state_path)
     if not existing_state:
         print(f"No saved session found at {state_path or DEFAULT_STATE_PATH}.")
@@ -258,6 +454,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", help="Target paper URL or login destination")
     parser.add_argument("--check", action="store_true", help="Check if existing authenticated session state exists")
+    parser.add_argument("--validate", action="store_true", help="Perform live session validation and trigger 2FA/SSO fallback if expired")
     parser.add_argument("--proxy-url", help="Rewrite and print the proxied URL for a given DOI or article link")
     parser.add_argument("--state-path", help=f"Custom path for session state JSON (default: {DEFAULT_STATE_PATH})")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
@@ -277,6 +474,10 @@ def main():
         proxied = get_proxied_url(args.proxy_url, inst)
         print(proxied)
         return 0
+
+    if args.validate:
+        valid = validate_session(state_path=args.state_path, institution=inst, test_url=args.url, interactive_fallback=not args.headless)
+        return 0 if valid else 1
 
     if args.check:
         valid = check_session(args.state_path)
