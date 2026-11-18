@@ -939,9 +939,9 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
 
                 # Specialized ScienceDirect / Elsevier Resolver
                 if is_sciencedirect:
-                    print(f"Navigating to ScienceDirect article: {proxied_article_url}")
+                    print(f"Navigating to ScienceDirect article landing page: {proxied_article_url}")
                     page.goto(proxied_article_url, wait_until="domcontentloaded", timeout=45000)
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(2000)
 
                     if auth_setup.is_login_or_challenge(page=page, institution=institution):
                         raise auth_setup.InstitutionalAuthChallenge(
@@ -949,183 +949,155 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                             target_url=proxied_article_url
                         )
 
-                    # Extract PII from page URL if not already known
+                    # 1. Direct ScienceDirect PII Resolution:
+                    # Resolve article's PII from landing page URL, meta tags, context.request query, or direct API query
                     if not sd_pii:
-                        pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I)
+                        pii_m = re.search(r'/article/pii/([A-Z0-9]+)', page.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', page.url, re.I)
                         if pii_m:
                             sd_pii = pii_m.group(1)
-                            print(f"Extracted ScienceDirect PII from page URL: {sd_pii}")
+                            print(f"Resolved ScienceDirect PII from landing page URL: {sd_pii}")
 
-                    # Check if navigation directly loaded a PDF
+                    if not sd_pii:
+                        try:
+                            meta_pii = page.eval_on_selector("meta[name='citation_pii']", "el => el.content")
+                            if meta_pii:
+                                sd_pii = meta_pii.strip()
+                                print(f"Resolved ScienceDirect PII from meta citation_pii: {sd_pii}")
+                        except Exception:
+                            pass
+
+                    if not sd_pii:
+                        try:
+                            meta_pii = page.eval_on_selector("meta[name='article:pii']", "el => el.content")
+                            if meta_pii:
+                                sd_pii = meta_pii.strip()
+                                print(f"Resolved ScienceDirect PII from meta article:pii: {sd_pii}")
+                        except Exception:
+                            pass
+
+                    if not sd_pii:
+                        # Direct landing page query via Playwright authenticated request context
+                        try:
+                            landing_resp = context.request.get(proxied_article_url, timeout=20000)
+                            if auth_setup.is_login_or_challenge(url=landing_resp.url, institution=institution):
+                                raise auth_setup.InstitutionalAuthChallenge(
+                                    message="Institutional login wall detected while querying ScienceDirect landing page",
+                                    target_url=proxied_article_url
+                                )
+                            m = re.search(r'/article/pii/([A-Z0-9]+)', landing_resp.url, re.I) or re.search(r'/pii/([A-Z0-9]+)', landing_resp.url, re.I)
+                            if m:
+                                sd_pii = m.group(1)
+                                print(f"Resolved ScienceDirect PII from landing request redirect: {sd_pii}")
+                            else:
+                                text = landing_resp.text()
+                                m = (
+                                    re.search(r'name=["\']citation_pii["\']\s+content=["\']([A-Z0-9]+)["\']', text, re.I) or
+                                    re.search(r'content=["\']([A-Z0-9]+)["\']\s+name=["\']citation_pii["\']', text, re.I) or
+                                    re.search(r'"pii"\s*:\s*"([A-Z0-9]+)"', text, re.I) or
+                                    re.search(r'/article/pii/([A-Z0-9]+)', text, re.I) or
+                                    re.search(r'/pii/([A-Z0-9]+)', text, re.I)
+                                )
+                                if m:
+                                    sd_pii = m.group(1)
+                                    print(f"Resolved ScienceDirect PII from landing request body: {sd_pii}")
+                        except auth_setup.InstitutionalAuthChallenge:
+                            raise
+                        except Exception as e:
+                            print(f"  Note on context.request PII resolution: {e}")
+
+                    if not sd_pii:
+                        # Direct API query (Crossref / DataCite metadata)
+                        res_meta = resolve_doi_metadata(clean_doi)
+                        if res_meta and res_meta.get("pii"):
+                            sd_pii = res_meta["pii"]
+                            print(f"Resolved ScienceDirect PII from API query: {sd_pii}")
+
+                    if not sd_pii:
+                        raise InvalidPDFError(f"Could not resolve ScienceDirect PII for DOI {clean_doi} from landing page or direct API query.")
+
+                    # Check if page navigation directly loaded a PDF stream
                     try:
                         content_type = page.evaluate("() => document.contentType")
                         if content_type == "application/pdf":
                             resp = context.request.get(page.url, timeout=25000)
-                            if resp.status == 200 and is_valid_pdf_stream(resp.body()):
+                            if resp.status == 200 and resp.body().startswith(b"%PDF-"):
+                                validate_pdf_stream(resp.body())
                                 pdf_bytes = resp.body()
                                 print(f"✓ Current ScienceDirect page is directly a PDF stream ({len(pdf_bytes):,} bytes).")
                     except Exception:
                         pass
 
-                    # 1. Robust DOM Element Indexing for "View PDF" & Direct Download Triggers
+                    # 2. Directly fetch PDF stream from Elsevier's official direct download endpoint format:
+                    # https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true
                     if not pdf_bytes:
-                        print("Indexing ScienceDirect DOM for primary PDF download triggers...")
-                        for sel in SCIENCEDIRECT_PDF_SELECTORS:
-                            if pdf_bytes:
-                                break
-                            try:
-                                btn = page.query_selector(sel)
-                                if not btn:
-                                    continue
-                                print(f"Found candidate PDF trigger matching selector '{sel}'.")
+                        official_pdf_url = f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true"
+                        print(f"Direct ScienceDirect PDF download targeting official endpoint: {official_pdf_url}")
 
-                                # Check href attribute for direct resolution
-                                href = btn.get_attribute("href")
-                                if href:
-                                    resolved_href = href if href.startswith("http") else urljoin(page.url, href)
-                                    print(f"Discovered trigger hyperlink: {resolved_href}")
-                                    if any(tok in resolved_href for tok in ["/pdfft", "/pdf", "download=true"]):
-                                        try:
-                                            resp = context.request.get(resolved_href, headers={"Referer": page.url}, timeout=25000)
-                                            if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
-                                                raise auth_setup.InstitutionalAuthChallenge(
-                                                    message="ScienceDirect PDF trigger redirected to institutional login wall",
-                                                    target_url=resolved_href
-                                                )
-                                            if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                                print(f"✓ Retrieved valid PDF via trigger hyperlink ({len(resp.body()):,} bytes).")
-                                                pdf_bytes = resp.body()
-                                                break
-                                        except auth_setup.InstitutionalAuthChallenge:
-                                            raise
-                                        except Exception as probe_err:
-                                            print(f"  Trigger probe note: {probe_err}")
-
-                                # Attempt interactive click and handle page.expect_download()
-                                try:
-                                    btn.scroll_into_view_if_needed(timeout=3000)
-                                except Exception:
-                                    pass
-
-                                print(f"Clicking trigger '{sel}' and awaiting browser download event or PDF stream...")
-                                try:
-                                    with page.expect_download(timeout=12000) as download_info:
-                                        btn.click(timeout=5000)
-                                    download = download_info.value
-                                    download.save_as(str(pdf_path))
-                                    if pdf_path.is_file():
-                                        downloaded_bytes = pdf_path.read_bytes()
-                                        if is_valid_pdf_stream(downloaded_bytes):
-                                            print(f"✓ Successfully captured PDF via Playwright expect_download ({len(downloaded_bytes):,} bytes).")
-                                            pdf_bytes = downloaded_bytes
-                                            break
-                                        else:
-                                            pdf_path.unlink(missing_ok=True)
-                                except Exception as click_err:
-                                    print(f"  Browser download event note: {click_err}")
-
-                                # Await PDF resource response or check intercepted network responses
-                                if not pdf_bytes:
-                                    for _ in range(8):
-                                        if intercepted_pdfs:
-                                            for cand in intercepted_pdfs:
-                                                if is_valid_pdf_stream(cand):
-                                                    pdf_bytes = cand
-                                                    print(f"✓ Captured valid PDF stream from network interception ({len(pdf_bytes):,} bytes).")
-                                                    break
-                                        if pdf_bytes:
-                                            break
-                                        page.wait_for_timeout(500)
-
-                                # Check newly opened popup tabs if any
-                                if not pdf_bytes and len(context.pages) > 1:
-                                    for popup in context.pages:
-                                        if popup != page:
-                                            try:
-                                                popup.wait_for_load_state("domcontentloaded", timeout=4000)
-                                                if popup.evaluate("() => document.contentType") == "application/pdf":
-                                                    resp = context.request.get(popup.url, timeout=20000)
-                                                    if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                                        pdf_bytes = resp.body()
-                                                        print(f"✓ Captured valid PDF stream from popup tab ({len(pdf_bytes):,} bytes).")
-                                                        break
-                                            except Exception:
-                                                pass
-                                    if pdf_bytes:
-                                        break
-
-                            except auth_setup.InstitutionalAuthChallenge:
-                                raise
-                            except Exception as sel_err:
-                                print(f"  Error processing selector '{sel}': {sel_err}")
-
-                    # 2. Target direct PII / PDF endpoint structures
-                    if not pdf_bytes and sd_pii:
+                        candidate_pdf_urls = [official_pdf_url]
                         parsed_u = urlsplit(page.url)
                         base_origin = f"{parsed_u.scheme}://{parsed_u.netloc}"
-                        pii_endpoints = [
-                            f"{base_origin}/science/article/pii/{sd_pii}/pdfft?download=true",
-                            f"{base_origin}/science/article/pii/{sd_pii}/pdf?download=true",
-                            f"{base_origin}/science/article/pii/{sd_pii}/pdf",
-                            f"{base_origin}/science/article/pii/{sd_pii}/pdfft",
-                            f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdfft?download=true",
-                            f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdf?download=true",
-                        ]
+                        if base_origin and "sciencedirect.com" not in parsed_u.netloc:
+                            candidate_pdf_urls.append(f"{base_origin}/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true")
 
-                        for cand in pii_endpoints:
+                        proxied_candidate = auth_setup.get_proxied_url(official_pdf_url, institution)
+                        if proxied_candidate not in candidate_pdf_urls:
+                            candidate_pdf_urls.append(proxied_candidate)
+
+                        html_fallback_detected = False
+                        last_html_body = None
+
+                        for target_pdf_url in candidate_pdf_urls:
+                            print(f"Directly fetching PDF stream via authenticated context.request: {target_pdf_url}")
                             try:
-                                print(f"Probing ScienceDirect PII endpoint: {cand[:80]}...")
-                                resp = context.request.get(cand, headers={"Referer": page.url}, timeout=20000)
-                                if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
+                                pdf_resp = context.request.get(
+                                    target_pdf_url,
+                                    headers={"Referer": page.url},
+                                    timeout=30000
+                                )
+
+                                if auth_setup.is_login_or_challenge(
+                                    url=pdf_resp.url,
+                                    html=pdf_resp.text() if "text/html" in pdf_resp.headers.get("content-type", "") else None,
+                                    institution=institution
+                                ):
                                     raise auth_setup.InstitutionalAuthChallenge(
-                                        message="ScienceDirect direct endpoint redirected to institutional login wall",
-                                        target_url=cand
+                                        message="ScienceDirect PDF download redirected to institutional login wall",
+                                        target_url=target_pdf_url
                                     )
-                                if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                    print(f"✓ ScienceDirect direct endpoint returned {len(resp.body()):,} bytes.")
-                                    pdf_bytes = resp.body()
+
+                                raw_bytes = pdf_resp.body()
+                                ct = pdf_resp.headers.get("content-type", "").lower()
+                                prefix = raw_bytes[:500].decode("utf-8", errors="replace").strip().lower()
+
+                                # Robust Validation: detect HTML fallback pages
+                                if "<html" in prefix or "<!doctype html" in prefix or "text/html" in ct:
+                                    html_fallback_detected = True
+                                    last_html_body = raw_bytes
+                                    print(f"  Warning: Candidate endpoint {target_pdf_url} returned an HTML fallback page ({len(raw_bytes):,} bytes).")
+                                    continue
+
+                                # Validate valid PDF bytes (%PDF-) and size > 100 KB before accepting
+                                if raw_bytes.startswith(b"%PDF-"):
+                                    validate_pdf_stream(raw_bytes)
+                                    pdf_bytes = raw_bytes
+                                    print(f"✓ Retrieved valid PDF stream directly from ScienceDirect endpoint ({len(pdf_bytes):,} bytes).")
                                     break
+                                else:
+                                    print(f"  Warning: Response did not start with %PDF- header. Starting bytes: {raw_bytes[:20]!r}")
+
                             except auth_setup.InstitutionalAuthChallenge:
                                 raise
-                            except Exception as e:
-                                print(f"  PII probe note: {e}")
+                            except InvalidPDFError:
+                                raise
+                            except Exception as fetch_err:
+                                print(f"  Direct PDF fetch note for {target_pdf_url}: {fetch_err}")
 
-                    # 3. Check response interception or viewer frames
-                    if not pdf_bytes and intercepted_pdfs:
-                        for cand in intercepted_pdfs:
-                            if is_valid_pdf_stream(cand):
-                                pdf_bytes = cand
-                                print(f"✓ Intercepted PDF response stream ({len(pdf_bytes):,} bytes).")
-                                break
-
-                    if not pdf_bytes:
-                        for selector in ["iframe[src*='pdf']", "embed[type='application/pdf']", "object[type='application/pdf']", "iframe#pdf-js-viewer"]:
-                            el = page.query_selector(selector)
-                            if el:
-                                src = el.get_attribute("src") or el.get_attribute("data")
-                                if src and src.startswith("http"):
-                                    print(f"Found embedded PDF frame: {src[:80]}...")
-                                    try:
-                                        resp = context.request.get(src, timeout=30000)
-                                        if auth_setup.is_login_or_challenge(url=resp.url, html=resp.text() if "text/html" in resp.headers.get("content-type", "") else None, institution=institution):
-                                            raise auth_setup.InstitutionalAuthChallenge(
-                                                message="Embedded PDF frame redirected to institutional login wall",
-                                                target_url=src
-                                            )
-                                        if resp.status == 200 and is_valid_pdf_stream(resp.body()):
-                                            pdf_bytes = resp.body()
-                                            break
-                                    except auth_setup.InstitutionalAuthChallenge:
-                                        raise
-                                    except Exception:
-                                        pass
-
-                    # 4. Check local user intake (~/Downloads)
-                    if not pdf_bytes:
-                        local_cand = check_local_downloads(pii=sd_pii, safe_name=safe_name)
-                        if local_cand and is_valid_pdf_stream(local_cand):
-                            print(f"✓ Retrieved publisher PDF from user intake: {local_cand.name} ({local_cand.stat().st_size:,} bytes)")
-                            pdf_bytes = local_cand.read_bytes()
+                        # If no valid PDF bytes retrieved and an HTML fallback page was returned, raise InvalidPDFError
+                        if not pdf_bytes and html_fallback_detected:
+                            raise InvalidPDFError(
+                                f"ScienceDirect returned an HTML fallback page ({len(last_html_body):,} bytes) rather than valid PDF bytes. "
+                                f"Official endpoint: {official_pdf_url}"
+                            )
 
                 else:
                     # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
