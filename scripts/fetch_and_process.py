@@ -1029,6 +1029,7 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
 
                     # 2. Directly fetch PDF stream from Elsevier's official direct download endpoint format:
                     # https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true
+                    # Uses page.goto(endpoint_url) within active browser context and page.expect_download() to intercept stream
                     if not pdf_bytes:
                         official_pdf_url = f"https://www.sciencedirect.com/science/article/pii/{sd_pii}/pdfft?isDTMRedir=true&download=true"
                         print(f"Direct ScienceDirect PDF download targeting official endpoint: {official_pdf_url}")
@@ -1047,43 +1048,75 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                         last_html_body = None
 
                         for target_pdf_url in candidate_pdf_urls:
-                            print(f"Directly fetching PDF stream via authenticated context.request: {target_pdf_url}")
+                            print(f"Navigating browser to direct ScienceDirect PDF endpoint: {target_pdf_url}")
                             try:
-                                pdf_resp = context.request.get(
-                                    target_pdf_url,
-                                    headers={"Referer": page.url},
-                                    timeout=30000
-                                )
+                                download = None
+                                try:
+                                    with page.expect_download(timeout=25000) as download_info:
+                                        try:
+                                            page.goto(target_pdf_url, timeout=25000)
+                                        except Exception:
+                                            # page.goto typically raises net::ERR_ABORTED when navigation triggers a browser download
+                                            pass
+                                    download = download_info.value
+                                except Exception as dl_err:
+                                    print(f"  Download event listener did not capture download for {target_pdf_url}: {dl_err}")
 
-                                if auth_setup.is_login_or_challenge(
-                                    url=pdf_resp.url,
-                                    html=pdf_resp.text() if "text/html" in pdf_resp.headers.get("content-type", "") else None,
-                                    institution=institution
-                                ):
-                                    raise auth_setup.InstitutionalAuthChallenge(
-                                        message="ScienceDirect PDF download redirected to institutional login wall",
-                                        target_url=target_pdf_url
-                                    )
+                                raw_bytes = None
+                                if download:
+                                    temp_pdf = out_dir / f".tmp_{safe_name}.pdf"
+                                    try:
+                                        download.save_as(str(temp_pdf))
+                                        if temp_pdf.is_file():
+                                            raw_bytes = temp_pdf.read_bytes()
+                                    except Exception as save_err:
+                                        print(f"  Download save_as error: {save_err}")
+                                    finally:
+                                        temp_pdf.unlink(missing_ok=True)
 
-                                raw_bytes = pdf_resp.body()
-                                ct = pdf_resp.headers.get("content-type", "").lower()
-                                prefix = raw_bytes[:500].decode("utf-8", errors="replace").strip().lower()
+                                    if not raw_bytes and hasattr(download, "path"):
+                                        try:
+                                            dp = download.path()
+                                            if dp and Path(dp).is_file():
+                                                raw_bytes = Path(dp).read_bytes()
+                                        except Exception:
+                                            pass
 
-                                # Robust Validation: detect HTML fallback pages
-                                if "<html" in prefix or "<!doctype html" in prefix or "text/html" in ct:
-                                    html_fallback_detected = True
-                                    last_html_body = raw_bytes
-                                    print(f"  Warning: Candidate endpoint {target_pdf_url} returned an HTML fallback page ({len(raw_bytes):,} bytes).")
-                                    continue
+                                if raw_bytes:
+                                    prefix = raw_bytes[:500].decode("utf-8", errors="replace").strip().lower()
+                                    if "<html" in prefix or "<!doctype html" in prefix:
+                                        html_fallback_detected = True
+                                        last_html_body = raw_bytes
+                                        print(f"  Warning: Download from {target_pdf_url} returned an HTML document ({len(raw_bytes):,} bytes).")
+                                        continue
 
-                                # Validate valid PDF bytes (%PDF-) and size > 100 KB before accepting
-                                if raw_bytes.startswith(b"%PDF-"):
+                                    # Validate %PDF- magic bytes header
+                                    if not raw_bytes.startswith(b"%PDF-"):
+                                        raise InvalidPDFError(
+                                            f"ScienceDirect downloaded file missing %PDF- magic bytes header. Starting bytes: {raw_bytes[:20]!r}"
+                                        )
+
                                     validate_pdf_stream(raw_bytes)
                                     pdf_bytes = raw_bytes
-                                    print(f"✓ Retrieved valid PDF stream directly from ScienceDirect endpoint ({len(pdf_bytes):,} bytes).")
+                                    print(f"✓ Intercepted and validated binary PDF stream via expect_download ({len(pdf_bytes):,} bytes).")
                                     break
                                 else:
-                                    print(f"  Warning: Response did not start with %PDF- header. Starting bytes: {raw_bytes[:20]!r}")
+                                    # No download captured; inspect page for institutional login challenge or HTML fallback
+                                    if auth_setup.is_login_or_challenge(page=page, institution=institution):
+                                        raise auth_setup.InstitutionalAuthChallenge(
+                                            message="ScienceDirect direct PDF endpoint redirected to institutional login wall",
+                                            target_url=target_pdf_url
+                                        )
+
+                                    try:
+                                        page_html = page.content()
+                                        prefix = page_html[:500].strip().lower()
+                                        if "<html" in prefix or "<!doctype html" in prefix:
+                                            html_fallback_detected = True
+                                            last_html_body = page_html.encode("utf-8")
+                                            print(f"  Warning: Navigation to {target_pdf_url} rendered an HTML fallback page.")
+                                    except Exception:
+                                        pass
 
                             except auth_setup.InstitutionalAuthChallenge:
                                 raise

@@ -143,26 +143,24 @@ class TestAuthFallback(unittest.TestCase):
 
                             def fake_goto(url, *args, **kwargs):
                                 nonlocal call_count
-                                call_count += 1
-                                if call_count == 1:
-                                    # First attempt: hit institutional 2FA/SSO challenge
-                                    mock_page.url = "https://onevu.vanderbilt.edu/idp/profile/SAML2/Redirect/SSO"
-                                else:
-                                    # Second attempt: successful navigation to article
-                                    mock_page.url = "https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/S016622360600248X"
+                                if "pdfft" not in url:
+                                    call_count += 1
+                                    if call_count == 1:
+                                        # First attempt: hit institutional 2FA/SSO challenge
+                                        mock_page.url = "https://onevu.vanderbilt.edu/idp/profile/SAML2/Redirect/SSO"
+                                    else:
+                                        # Second attempt: successful navigation to article
+                                        mock_page.url = "https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/S016622360600248X"
 
                             mock_page.goto.side_effect = fake_goto
 
-                            # Set up PDF download on attempt 2
-                            def fake_request_get(url, *args, **kwargs):
-                                resp = MagicMock()
-                                resp.url = url
-                                resp.status = 200
-                                resp.headers = {"content-type": "application/pdf"}
-                                resp.body.return_value = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 150000
-                                return resp
+                            # Set up PDF download on attempt 2 via expect_download
+                            mock_download = MagicMock()
+                            def fake_save_as(dest):
+                                Path(dest).write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 150000)
 
-                            mock_context.request.get.side_effect = fake_request_get
+                            mock_download.save_as.side_effect = fake_save_as
+                            mock_page.expect_download.return_value.__enter__.return_value = MagicMock(value=mock_download)
 
                             with patch("fetch_and_process.source_files.inspect_file") as mock_inspect:
                                 mock_inspect.return_value = ({"mechanical_status": "pass", "bytes": 150050, "page_count": 8}, "")

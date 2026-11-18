@@ -146,14 +146,13 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                     mock_page.url = "https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/S12345"
                     mock_page.evaluate.return_value = "text/html"
 
-                    # Mock context.request.get returning valid PDF bytes
-                    mock_resp = MagicMock()
-                    mock_resp.url = "https://www.sciencedirect.com/science/article/pii/S12345/pdfft?isDTMRedir=true&download=true"
-                    mock_resp.status = 200
-                    mock_resp.headers = {"content-type": "application/pdf"}
-                    mock_resp.body.return_value = valid_pdf_payload
+                    # Mock Playwright expect_download capturing binary PDF stream via direct endpoint navigation
+                    mock_download = MagicMock()
+                    def fake_save_as(dest):
+                        Path(dest).write_bytes(valid_pdf_payload)
 
-                    mock_context.request.get.return_value = mock_resp
+                    mock_download.save_as.side_effect = fake_save_as
+                    mock_page.expect_download.return_value.__enter__.return_value = MagicMock(value=mock_download)
 
                     pdf_path, rep = fetch_and_process.step_a_download_paper(
                         doi="10.1016/j.cell.2023.01.001",
@@ -168,14 +167,15 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                     self.assertEqual(rep["mechanical_status"], "pass")
                     self.assertGreater(pdf_path.stat().st_size, MIN_PDF_SIZE_BYTES)
 
-                    # Verify official Elsevier direct download endpoint was queried
-                    called_urls = [call.args[0] for call in mock_context.request.get.call_args_list]
+                    # Verify expect_download was used to intercept stream
+                    mock_page.expect_download.assert_called()
+
+                    # Verify page.goto was called with the direct PII endpoint format (/pdfft?)
+                    called_goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
                     self.assertTrue(
-                        any("https://www.sciencedirect.com/science/article/pii/S12345/pdfft?isDTMRedir=true&download=true" in u for u in called_urls),
-                        f"Expected direct endpoint query format in called URLs: {called_urls}"
+                        any("https://www.sciencedirect.com/science/article/pii/S12345/pdfft?isDTMRedir=true&download=true" in u for u in called_goto_urls),
+                        f"Expected direct endpoint query format in called goto URLs: {called_goto_urls}"
                     )
-                    # Verify brittle button clicking was bypassed (expect_download not called)
-                    mock_page.expect_download.assert_not_called()
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -204,15 +204,14 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                     mock_page.url = "https://www-sciencedirect-com.proxy.library.vanderbilt.edu/science/article/pii/S12345"
                     mock_page.evaluate.return_value = "text/html"
 
-                    # Mock context.request.get returning HTML fallback document
-                    mock_resp = MagicMock()
-                    mock_resp.url = "https://www.sciencedirect.com/science/article/pii/S12345/pdfft?isDTMRedir=true&download=true"
-                    mock_resp.status = 200
-                    mock_resp.headers = {"content-type": "text/html; charset=utf-8"}
-                    mock_resp.body.return_value = html_fallback_payload
-                    mock_resp.text.return_value = html_fallback_payload.decode("utf-8")
+                    # Mock expect_download delivering an HTML fallback file
+                    mock_download = MagicMock()
+                    def fake_save_html(dest):
+                        Path(dest).write_bytes(html_fallback_payload)
 
-                    mock_context.request.get.return_value = mock_resp
+                    mock_download.save_as.side_effect = fake_save_html
+                    mock_page.expect_download.return_value.__enter__.return_value = MagicMock(value=mock_download)
+                    mock_page.content.return_value = html_fallback_payload.decode("utf-8")
 
                     with self.assertRaises(InvalidPDFError) as ctx:
                         fetch_and_process.step_a_download_paper(
@@ -224,7 +223,7 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                             skip_oa=True
                         )
 
-                    self.assertIn("HTML fallback page", str(ctx.exception))
+                    self.assertIn("HTML", str(ctx.exception))
                     # Ensure no file was saved to downloads/
                     saved_files = list(out_dir.glob("*.pdf"))
                     self.assertEqual(len(saved_files), 0)
@@ -260,20 +259,12 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                     mock_page.evaluate.return_value = "text/html"
                     mock_page.eval_on_selector.return_value = "S9876543210"
 
-                    def fake_request_get(url, *args, **kwargs):
-                        resp = MagicMock()
-                        resp.url = url
-                        resp.status = 200
-                        if "pdfft" in url:
-                            resp.headers = {"content-type": "application/pdf"}
-                            resp.body.return_value = valid_pdf_payload
-                        else:
-                            resp.headers = {"content-type": "text/html"}
-                            resp.body.return_value = b"<html></html>"
-                            resp.text.return_value = "<html></html>"
-                        return resp
+                    mock_download = MagicMock()
+                    def fake_save_as(dest):
+                        Path(dest).write_bytes(valid_pdf_payload)
 
-                    mock_context.request.get.side_effect = fake_request_get
+                    mock_download.save_as.side_effect = fake_save_as
+                    mock_page.expect_download.return_value.__enter__.return_value = MagicMock(value=mock_download)
 
                     pdf_path, rep = fetch_and_process.step_a_download_paper(
                         doi="10.1016/j.cell.2023.01.001",
@@ -285,10 +276,10 @@ class TestScienceDirectDOMIndexing(unittest.TestCase):
                     )
 
                     self.assertTrue(pdf_path.is_file())
-                    called_urls = [call.args[0] for call in mock_context.request.get.call_args_list]
+                    called_goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
                     self.assertTrue(
-                        any("https://www.sciencedirect.com/science/article/pii/S9876543210/pdfft?isDTMRedir=true&download=true" in u for u in called_urls),
-                        f"Expected direct download URL targeting resolved PII S9876543210, got: {called_urls}"
+                        any("https://www.sciencedirect.com/science/article/pii/S9876543210/pdfft?isDTMRedir=true&download=true" in u for u in called_goto_urls),
+                        f"Expected direct download URL targeting resolved PII S9876543210, got: {called_goto_urls}"
                     )
 
         shutil.rmtree(temp_dir, ignore_errors=True)
