@@ -66,7 +66,9 @@ flowchart TD
         SessionState -.-> StepA
         
         DirectHTTP --> RawPDF["Raw PDF (downloads/<doi>.pdf)"]
-        StepA --> RawPDF
+        StepA -->|"Direct Stream"| RawPDF
+        StepA -->|"Cloudflare / 600010 Error"| PrintPDF["Automated Print-to-PDF (page.pdf())\n[Tagged: Print Capture - Not Publisher Formatted PDF]\n+ Logged to working/manual_pdf_urls.json"]
+        PrintPDF --> RawPDF
         
         RawPDF -->|"Mechanical Verification"| StepB["Step B: Markdown Conversion (PyMuPDF4LLM)"]
         StepB -->|"Layout Parsing + YAML Frontmatter"| SourceMD["Structured Markdown (working/source-text/<doi>.md)"]
@@ -118,9 +120,20 @@ flowchart TD
    ```
 
    **Pipeline Stages:**
-   - **Step A (Download)**: Automatically detects Open Access DOIs (eLife, PLOS, Frontiers, arXiv, PMC, BioMed Central, MDPI) and retrieves the PDF directly via HTTP/browser fetch bypassing EZproxy. For paywalled papers, uses your active institutional session to stream raw PDFs from publisher gateways into `downloads/` (or `$PAPER_DOWNLOAD_DIR`), verified via `source_files.py`.
-   - **Step B (Markdown Conversion)**: Employs `pymupdf4llm` to extract document structure, headers, and tables into `working/source-text/<doi>.md` with YAML frontmatter.
+   - **Step A (Download & Automated Fallback)**: Automatically detects Open Access DOIs (eLife, PLOS, Frontiers, arXiv, PMC, BioMed Central, MDPI) and retrieves the PDF directly via HTTP/browser fetch bypassing EZproxy. For paywalled papers, uses your active institutional session to stream raw PDFs from publisher gateways into `downloads/` (or `$PAPER_DOWNLOAD_DIR`), verified via `source_files.py`. If direct PDF download is blocked by anti-bot barriers or proxy restrictions (e.g. ScienceDirect/Elsevier error `600010`), the pipeline falls back automatically without blocking on interactive prompts, rendering the article page via Playwright `page.pdf()`.
+   - **Step B (Markdown Conversion)**: Employs `pymupdf4llm` to extract document structure, headers, and tables into `working/source-text/<doi>.md` with YAML frontmatter (including `is_print_fallback: true` when print capture is activated).
    - **Step C (Zotero Sync / Intake)**: If `ZOTERO_USER_ID` and `ZOTERO_API_KEY` are present in `.env`, automatically creates the Zotero library item in the target collection (specified by `ZOTERO_COLLECTION_NAME`, defaulting to `"New"`) and attaches both PDF and Markdown note. Otherwise, generates a verified offline intake package (`working/zotero_intake/<doi>/`) containing `citation.ris`, `paper.pdf`, `notes.md`, and `manifest.json`.
+
+### Publisher Anti-Bot Defenses & Proxy Restrictions (Print-to-PDF Fallback & Manual Queue)
+
+> [!NOTE]
+> **Publisher Anti-Bot & Proxy Restrictions (ScienceDirect/Elsevier Error 600010 & Cloudflare Challenges)**:
+> Automated retrieval of official journal-formatted PDFs can be blocked by publisher anti-bot challenges (such as Cloudflare Turnstile or hCaptcha) or institutional proxy restrictions on direct binary endpoints (specifically ScienceDirect/Elsevier error `600010` on `/pdfft` routes).
+>
+> When direct PDF download is blocked or returns an HTML challenge/error page, the pipeline falls back automatically without blocking on interactive browser prompts:
+> 1. **Automated Print-to-PDF Fallback (`page.pdf()`)**: Playwright renders the accessible HTML article landing page in headless Chromium and exports it to a PDF via `page.pdf()`, allowing downstream Markdown conversion and reference manager intake to proceed without interruption.
+> 2. **Clear Flagging & Titling**: The resulting document, metadata, Markdown frontmatter (`is_print_fallback: true`), and Zotero intake records/manifest are explicitly tagged with `[Print Capture - Not Publisher Formatted PDF]` to clearly distinguish them from official publisher-typeset PDFs.
+> 3. **Manual Download Queue (`working/manual_pdf_urls.json` & `.txt`)**: Every article that falls back to a print capture is recorded into dedicated queue files containing the DOI, title, target article URL, and timestamp (deduplicated across repeat runs). This allows researchers to manually inspect or download the publisher-formatted PDF later if desired.
 
 ## What the workflow preserves
 

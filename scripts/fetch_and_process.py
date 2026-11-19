@@ -44,6 +44,9 @@ except ImportError:
 
 
 MIN_PDF_SIZE_BYTES = 100 * 1024  # 100 KB threshold (102,400 bytes)
+PRINT_CAPTURE_TAG = "[Print Capture - Not Publisher Formatted PDF]"
+MANUAL_PDF_URLS_JSON = "manual_pdf_urls.json"
+MANUAL_PDF_URLS_TXT = "manual_pdf_urls.txt"
 
 
 class InvalidPDFError(RuntimeError):
@@ -51,13 +54,14 @@ class InvalidPDFError(RuntimeError):
     pass
 
 
-def validate_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES):
+def validate_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES, allow_print_fallback=False):
     """Verify that content or file is a valid binary PDF stream.
 
     Validates:
     - Magic bytes start with b"%PDF-"
-    - File size is strictly greater than min_size (100 KB)
-    - Rejects HTML fallbacks, print fallbacks, and invalid stubs
+    - File size is strictly greater than min_size (100 KB) for official publisher PDFs,
+      or size > 500 bytes when allow_print_fallback=True.
+    - Rejects raw HTML challenge/error pages and invalid stubs.
 
     Raises:
         InvalidPDFError: If validation fails.
@@ -87,19 +91,21 @@ def validate_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES):
             f"Retrieved {label} missing %PDF- magic bytes header. Starting bytes: {blob[:20]!r}"
         )
 
-    if size <= min_size:
+    effective_min_size = 500 if allow_print_fallback else min_size
+    if size <= effective_min_size:
+        threshold_desc = "threshold" if allow_print_fallback else "100 KB minimum threshold"
         raise InvalidPDFError(
-            f"Retrieved {label} size ({size:,} bytes) is not greater than the required 100 KB minimum threshold "
-            f"({min_size:,} bytes). Rejected possible print fallback, thumbnail, or invalid stub."
+            f"Retrieved {label} size ({size:,} bytes) is not greater than the required {threshold_desc} "
+            f"({effective_min_size:,} bytes). Rejected possible print fallback, thumbnail, or invalid stub."
         )
 
     return True
 
 
-def is_valid_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES):
-    """Convenience helper returning True if content/file is a valid binary PDF stream > 100 KB."""
+def is_valid_pdf_stream(content_or_path, min_size=MIN_PDF_SIZE_BYTES, allow_print_fallback=False):
+    """Convenience helper returning True if content/file is a valid binary PDF stream."""
     try:
-        validate_pdf_stream(content_or_path, min_size=min_size)
+        validate_pdf_stream(content_or_path, min_size=min_size, allow_print_fallback=allow_print_fallback)
         return True
     except InvalidPDFError:
         return False
@@ -210,6 +216,181 @@ def log_failure(doi, failure_stage, error, endpoint_url=None, working_dir=None):
             print(f"  Note: Failed writing to {summary_file.name}: {e}")
     else:
         print(f"DOI {clean_doi} already logged in {summary_file.name}; skipping duplicate summary entry.")
+
+
+def log_manual_pdf_url(doi, title=None, target_article_url=None, working_dir=None):
+    """Record a paper that fell back to print-to-PDF into dedicated manual download queue files:
+    1. working/manual_pdf_urls.json: Structured JSON array of entries.
+    2. working/manual_pdf_urls.txt: Plaintext line log.
+    Deduplicated so repeat runs do not create duplicate entries.
+    """
+    clean_doi = normalize_doi(doi) if doi else "unknown"
+    w_dir = Path(working_dir or ROOT / "working").resolve()
+    w_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    clean_title = (title or f"Paper {clean_doi}").replace(PRINT_CAPTURE_TAG, "").strip()
+    target_url = target_article_url or (f"https://doi.org/{clean_doi}" if clean_doi != "unknown" else "")
+
+    # 1. JSON queue log (deduplicated by DOI)
+    json_path = w_dir / MANUAL_PDF_URLS_JSON
+    entries = []
+    found_idx = -1
+    if json_path.is_file():
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    entries = data
+                    for i, item in enumerate(entries):
+                        if isinstance(item, dict) and normalize_doi(item.get("doi")) == clean_doi:
+                            found_idx = i
+                            break
+        except Exception as e:
+            print(f"  Note reading {json_path.name}: {e}")
+
+    if found_idx == -1:
+        entries.append({
+            "doi": clean_doi,
+            "title": clean_title,
+            "target_article_url": target_url,
+            "timestamp": timestamp,
+        })
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(entries, f, indent=2, ensure_ascii=False)
+            print(f"Recorded paper to manual download queue in {json_path.name} (DOI: {clean_doi})")
+        except Exception as e:
+            print(f"  Note writing to {json_path.name}: {e}")
+    else:
+        if clean_title and clean_title != f"Paper {clean_doi}" and entries[found_idx].get("title") == f"Paper {clean_doi}":
+            entries[found_idx]["title"] = clean_title
+            if target_url:
+                entries[found_idx]["target_article_url"] = target_url
+            try:
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(entries, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+        print(f"DOI {clean_doi} already present in {json_path.name}; skipping duplicate JSON entry.")
+
+    # 2. Text queue log (deduplicated by DOI)
+    txt_path = w_dir / MANUAL_PDF_URLS_TXT
+    already_in_txt = False
+    if txt_path.is_file():
+        try:
+            content = txt_path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if clean_doi.lower() in line.lower():
+                    already_in_txt = True
+                    break
+        except Exception:
+            already_in_txt = False
+
+    if not already_in_txt:
+        txt_line = f"[{timestamp}] DOI: {clean_doi} | Title: {clean_title} | URL: {target_url}\n"
+        try:
+            with open(txt_path, "a", encoding="utf-8") as f:
+                f.write(txt_line)
+            print(f"Recorded paper to manual download queue in {txt_path.name} (DOI: {clean_doi})")
+        except Exception as e:
+            print(f"  Note writing to {txt_path.name}: {e}")
+    else:
+        print(f"DOI {clean_doi} already present in {txt_path.name}; skipping duplicate text entry.")
+
+
+def render_print_to_pdf_fallback(page, target_article_url, pdf_path, institution=None):
+    """Render article landing page in Playwright and export to PDF via page.pdf().
+
+    Used when direct PDF download fails or returns an HTML challenge/error page
+    (such as Cloudflare/anti-bot challenges or ScienceDirect/Elsevier error 600010).
+    """
+    pdf_path = Path(pdf_path).resolve()
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n⚡ Activating Automated Print-to-PDF Fallback (page.pdf())")
+    print(f" Target Article URL: {target_article_url}")
+
+    if not hasattr(page, "pdf"):
+        print("  Playwright page object does not support pdf(); skipping print fallback.")
+        return None, None
+
+    # Ensure page is navigated to the article landing page (not the failed /pdfft endpoint)
+    current_url = getattr(page, "url", "")
+    needs_nav = True
+    if current_url:
+        if "/pdfft" not in current_url and ("article" in current_url or "doi.org" in current_url or "sciencedirect" in current_url):
+            needs_nav = False
+
+    if needs_nav and target_article_url:
+        print(f"Navigating browser to article page for print capture: {target_article_url}")
+        try:
+            page.goto(target_article_url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(2000)
+        except Exception as nav_err:
+            print(f"  Note during article page navigation for print capture: {nav_err}")
+
+    try:
+        pdf_bytes = page.pdf(print_background=True)
+        if isinstance(pdf_bytes, (bytes, bytearray)) and pdf_bytes.startswith(b"%PDF-"):
+            pdf_path.write_bytes(pdf_bytes)
+            validate_pdf_stream(pdf_path, allow_print_fallback=True)
+            rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            rep["is_print_fallback"] = True
+            rep["print_capture"] = True
+            rep["print_capture_tag"] = PRINT_CAPTURE_TAG
+            print(f"✓ Print-to-PDF capture successful: {pdf_path.name} ({len(pdf_bytes):,} bytes).")
+            return pdf_path, rep
+        elif pdf_path.is_file() and is_valid_pdf_stream(pdf_path, allow_print_fallback=True):
+            rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            rep["is_print_fallback"] = True
+            rep["print_capture"] = True
+            rep["print_capture_tag"] = PRINT_CAPTURE_TAG
+            return pdf_path, rep
+    except Exception as pdf_err:
+        print(f"  Automated print-to-PDF capture encountered an error: {pdf_err}")
+
+    return None, None
+
+
+def launch_and_render_print_to_pdf(target_article_url, pdf_path, session_file=None, institution=None):
+    """Launch headless browser and render target article URL to PDF via page.pdf()."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=list(STEALTH_BROWSER_ARGS)
+            )
+            context_kwargs = {
+                "accept_downloads": True,
+                "user_agent": DEFAULT_DESKTOP_USER_AGENT,
+            }
+            s_file = session_file or auth_setup.get_existing_state_path()
+            if s_file and Path(s_file).is_file():
+                context_kwargs["storage_state"] = str(s_file)
+
+            context = browser.new_context(**context_kwargs)
+            inject_storage_state_cookies(context, s_file)
+            cookie_header = get_cookie_header_string(s_file)
+            if cookie_header:
+                try:
+                    context.set_extra_http_headers({"Cookie": cookie_header})
+                except Exception:
+                    pass
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            page = context.new_page()
+
+            res_pdf, rep = render_print_to_pdf_fallback(page, target_article_url, pdf_path, institution=institution)
+            browser.close()
+            return res_pdf, rep
+    except Exception as e:
+        print(f"  Note during launch_and_render_print_to_pdf: {e}")
+        return None, None
 
 
 SCIENCEDIRECT_PDF_SELECTORS = [
@@ -366,6 +547,9 @@ def build_ris_string(metadata):
         lines.append(f"UR  - https://doi.org/{doi}")
     elif metadata.get("url"):
         lines.append(f"UR  - {metadata['url']}")
+
+    if metadata.get("is_print_fallback"):
+        lines.append(f"N1  - {PRINT_CAPTURE_TAG} Automated print-to-PDF fallback")
 
     lines.append("ER  - \n")
     return "\n".join(lines)
@@ -1149,7 +1333,7 @@ def interactive_headed_download(doi, target_url, pdf_path, session_file=None, pi
     raise err
 
 
-def step_a_download_paper(doi, institution=None, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True, skip_oa=False, interactive_fallback=True, is_batch=False):
+def step_a_download_paper(doi, institution=None, state_path=None, output_dir=None, direct_url=None, pii=None, headless=True, skip_oa=False, interactive_fallback=True, is_batch=False, working_dir=None):
     """Step A: Download raw paper PDF using Open-Access direct fetch or authenticated institutional session."""
     auth_setup.load_env_vars()
     clean_doi = normalize_doi(doi)
@@ -1161,9 +1345,9 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
     pdf_path = out_dir / f"{safe_name}.pdf"
 
     # Check if already present and valid in downloads/
-    if pdf_path.is_file() and is_valid_pdf_stream(pdf_path):
+    if pdf_path.is_file() and is_valid_pdf_stream(pdf_path, allow_print_fallback=True):
         inspect_report, _ = source_files.inspect_file(pdf_path, expected="pdf")
-        if inspect_report.get("mechanical_status") == "pass":
+        if inspect_report.get("mechanical_status") in ("pass", "unresolved") and inspect_report.get("errors") == []:
             print(f"✓ Valid PDF already exists at {pdf_path} ({pdf_path.stat().st_size:,} bytes).")
             return pdf_path, inspect_report
 
@@ -1485,12 +1669,24 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                                 except Exception as fetch_err:
                                     print(f"  Direct PDF fetch note for {target_pdf_url}: {fetch_err}")
 
-                            # If no valid PDF bytes retrieved and an HTML fallback page was returned, raise InvalidPDFError
-                            if not pdf_bytes and html_fallback_detected:
-                                raise InvalidPDFError(
-                                    f"ScienceDirect returned an HTML fallback page ({len(last_html_body):,} bytes) rather than valid PDF bytes. "
-                                    f"Official endpoint: {official_pdf_url}"
+                            # If no valid PDF bytes retrieved and an HTML fallback page was returned, trigger automated print-to-PDF
+                            if not pdf_bytes:
+                                print(f"⚡ Direct ScienceDirect PDF retrieval failed or returned HTML challenge/error (e.g. error 600010).")
+                                print("Activating automated print-to-PDF fallback (page.pdf())...")
+                                res_pdf, rep = render_print_to_pdf_fallback(
+                                    page=page,
+                                    target_article_url=proxied_article_url or target_article_url,
+                                    pdf_path=pdf_path,
+                                    institution=institution
                                 )
+                                if res_pdf and rep:
+                                    browser.close()
+                                    return res_pdf, rep
+                                elif html_fallback_detected:
+                                    raise InvalidPDFError(
+                                        f"ScienceDirect returned an HTML fallback page ({len(last_html_body) if last_html_body else 0:,} bytes) rather than valid PDF bytes. "
+                                        f"Official endpoint: {official_pdf_url}"
+                                    )
 
                     else:
                         # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
@@ -1668,6 +1864,15 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
             pdf_path.write_bytes(pdf_bytes)
 
         if not pdf_path.is_file():
+            print(f"⚡ Direct publisher PDF retrieval failed for DOI {clean_doi}. Activating automated print-to-PDF fallback (page.pdf())...")
+            res_pdf, rep = launch_and_render_print_to_pdf(
+                target_article_url=proxied_article_url if 'proxied_article_url' in locals() else (target_article_url if 'target_article_url' in locals() else f"https://doi.org/{clean_doi}"),
+                pdf_path=pdf_path,
+                session_file=session_file if 'session_file' in locals() else None,
+                institution=institution
+            )
+            if res_pdf and rep:
+                return res_pdf, rep
             raise InvalidPDFError(f"Failed to retrieve valid PDF for DOI {clean_doi}: No PDF file was saved.")
 
         # Validation & Quality Check
@@ -1697,6 +1902,21 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
         )
         setattr(err, "endpoint_url", target_endpoint_url)
 
+        # Attempt automated print-to-PDF recovery if valid PDF was not captured
+        if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path, allow_print_fallback=True)):
+            print(f"⚡ Attempting automated print-to-PDF recovery for {clean_doi} (page.pdf())...")
+            try:
+                res_pdf, rep = launch_and_render_print_to_pdf(
+                    target_article_url=target_endpoint_url,
+                    pdf_path=pdf_path,
+                    session_file=session_file if 'session_file' in locals() else None,
+                    institution=institution
+                )
+                if res_pdf and rep:
+                    return res_pdf, rep
+            except Exception as print_fallback_err:
+                print(f"  Automated print-to-PDF recovery note: {print_fallback_err}")
+
         if not is_batch and interactive_fallback and headless:
             print(f"\n⚡ Headless retrieval failure on DOI {clean_doi}: {err}")
             print("Switching from headless to interactive headed mode...")
@@ -1710,7 +1930,7 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                 institution=institution
             )
         else:
-            w_dir = Path(output_dir or ROOT / "downloads").resolve().parent / "working"
+            w_dir = Path(working_dir or (output_dir or ROOT / "downloads")).resolve().parent / "working"
             log_failure(
                 doi=clean_doi,
                 failure_stage="step_a_download",
@@ -1725,7 +1945,8 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
 def step_b_convert_to_markdown(pdf_path, metadata, source_text_dir=None):
     """Step B: Convert downloaded PDF into clean structured Markdown with YAML frontmatter."""
     pdf_path = Path(pdf_path).resolve()
-    validate_pdf_stream(pdf_path)
+    is_fallback = bool(metadata.get("is_print_fallback") or PRINT_CAPTURE_TAG in metadata.get("title", ""))
+    validate_pdf_stream(pdf_path, allow_print_fallback=is_fallback)
     clean_doi = normalize_doi(metadata.get("doi", ""))
     safe_name = doi_to_filename(clean_doi) if clean_doi else pdf_path.stem
     out_dir = Path(source_text_dir or ROOT / "working" / "source-text").resolve()
@@ -1778,6 +1999,10 @@ def step_b_convert_to_markdown(pdf_path, metadata, source_text_dir=None):
 
     rel_pdf = str(pdf_path.relative_to(ROOT)) if pdf_path.is_relative_to(ROOT) else str(pdf_path)
 
+    fallback_yaml = ""
+    if is_fallback:
+        fallback_yaml = f"is_print_fallback: true\nprint_capture: true\nprint_capture_tag: \"{PRINT_CAPTURE_TAG}\"\n"
+
     frontmatter = f"""---
 title: "{metadata.get('title', 'Untitled')}"
 doi: "{clean_doi}"
@@ -1788,7 +2013,7 @@ authors:
 source_pdf: "{rel_pdf}"
 converted_at: "{datetime.now(timezone.utc).isoformat()}"
 conversion_tool: "{tool_used}"
----
+{fallback_yaml}---
 
 """
     full_content = frontmatter + markdown_body.strip() + "\n"
@@ -1845,6 +2070,8 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
 
     clean_doi = normalize_doi(metadata.get("doi", ""))
     safe_name = doi_to_filename(clean_doi) if clean_doi else Path(pdf_path).stem
+    is_fallback = bool(metadata.get("is_print_fallback") or PRINT_CAPTURE_TAG in metadata.get("title", ""))
+    validate_pdf_stream(pdf_path, allow_print_fallback=is_fallback)
 
     # Attempt programmatic sync if API credentials configured
     if api_key and user_id and zotero is not None:
@@ -1873,6 +2100,12 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
 
             if col_key:
                 template["collections"] = [col_key]
+
+            if is_fallback:
+                template.setdefault("tags", []).extend([
+                    {"tag": "print-capture-fallback"},
+                    {"tag": "not-publisher-formatted-pdf"}
+                ])
 
             creators = []
             for author in metadata.get("authors", []):
@@ -1904,7 +2137,8 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
 
                 # Attach Markdown note
                 try:
-                    note_body = f"<h2>{metadata.get('title')}</h2><p>Structured Markdown generated at: <code>{markdown_path}</code></p>"
+                    fallback_notice = f"<p><em>Note: This item was captured via automated print-to-PDF fallback {PRINT_CAPTURE_TAG}.</em></p>" if is_fallback else ""
+                    note_body = f"<h2>{metadata.get('title')}</h2>{fallback_notice}<p>Structured Markdown generated at: <code>{markdown_path}</code></p>"
                     zot.create_notes([{"parentItem": item_key, "note": note_body}])
                     print("✓ Attached Markdown note to Zotero item.")
                 except Exception as e:
@@ -1931,7 +2165,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
     ris_file.write_text(ris_content, encoding="utf-8")
 
     # 2. PDF Copy
-    validate_pdf_stream(pdf_path)
+    validate_pdf_stream(pdf_path, allow_print_fallback=is_fallback)
     dest_pdf = package_dir / "paper.pdf"
     shutil.copy2(pdf_path, dest_pdf)
 
@@ -1940,6 +2174,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
     shutil.copy2(markdown_path, dest_md)
 
     # 4. Intake Manifest
+    tags = ["print-capture-fallback", "not-publisher-formatted-pdf"] if is_fallback else []
     manifest = {
         "paper_id": metadata.get("id", "P0001"),
         "doi": clean_doi,
@@ -1949,6 +2184,9 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
         "venue": metadata.get("venue", ""),
         "target_collection": target_collection_name,
         "intake_status": "verified",
+        "is_print_fallback": is_fallback,
+        "print_capture": is_fallback,
+        "tags": tags,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "package_files": {
             "citation_ris": str(ris_file.relative_to(ROOT)) if ris_file.is_relative_to(ROOT) else str(ris_file),
@@ -1960,6 +2198,8 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
             "zotero_cloud": "Add ZOTERO_USER_ID and ZOTERO_API_KEY to your .env file to enable automated cloud upload."
         }
     }
+    if is_fallback:
+        manifest["capture_note"] = f"Automated print-to-PDF capture fallback {PRINT_CAPTURE_TAG}. Official publisher PDF download was blocked by challenge/error screen."
     manifest_file = package_dir / "manifest.json"
     manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -2012,8 +2252,9 @@ def update_catalogue_records(doi, pdf_path, markdown_path, metadata):
             "warnings": []
         })
 
-    target_paper["download_status"] = "pdf_verified"
-    target_paper["full_text_status"] = "verified"
+    is_fallback = bool(metadata.get("is_print_fallback") or PRINT_CAPTURE_TAG in metadata.get("title", ""))
+    target_paper["download_status"] = "print_fallback_verified" if is_fallback else "pdf_verified"
+    target_paper["full_text_status"] = "print_fallback_verified" if is_fallback else "verified"
     target_paper["download_verification"] = {
         "path": rel_pdf,
         "source_url": target_paper.get("download_verification", {}).get("source_url") or target_paper.get("article_url") or f"https://doi.org/{clean_doi}",
@@ -2022,7 +2263,8 @@ def update_catalogue_records(doi, pdf_path, markdown_path, metadata):
         "sha256": source_files.inspect_file(pdf_path)[0].get("sha256"),
         "page_count": source_files.inspect_file(pdf_path)[0].get("page_count"),
         "identity_checked": True,
-        "readability_checked": True
+        "readability_checked": True,
+        "is_print_fallback": is_fallback,
     }
     target_paper["updated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -2102,13 +2344,16 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
     print("=" * 70)
 
     # Step A: Download
+    is_print_fallback = False
     try:
         if skip_download and pdf_dest.is_file():
             print(f"Step A (Download) skipped: Using existing file at {pdf_dest}")
-            validate_pdf_stream(pdf_dest)
+            validate_pdf_stream(pdf_dest, allow_print_fallback=True)
             pdf_path = pdf_dest
+            download_report, _ = source_files.inspect_file(pdf_path, expected="pdf")
+            is_print_fallback = bool(download_report.get("is_print_fallback", False) or PRINT_CAPTURE_TAG in metadata.get("title", ""))
         else:
-            pdf_path, _ = step_a_download_paper(
+            pdf_path, download_report = step_a_download_paper(
                 doi=target_doi,
                 institution=inst,
                 state_path=state_path,
@@ -2118,8 +2363,10 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
                 headless=headless,
                 skip_oa=skip_oa,
                 interactive_fallback=effective_interactive_fallback,
-                is_batch=batch_mode
+                is_batch=batch_mode,
+                working_dir=w_dir
             )
+            is_print_fallback = bool(download_report.get("is_print_fallback", False))
     except Exception as exc:
         if not getattr(exc, "_already_logged", False):
             endpoint_url = getattr(exc, "endpoint_url", None) or metadata.get("url") or f"https://doi.org/{target_doi}"
@@ -2132,6 +2379,21 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
             )
             setattr(exc, "_already_logged", True)
         raise
+
+    if is_print_fallback:
+        metadata["is_print_fallback"] = True
+        metadata["print_capture"] = True
+        metadata["print_capture_tag"] = PRINT_CAPTURE_TAG
+        if PRINT_CAPTURE_TAG not in metadata.get("title", ""):
+            metadata["title"] = f"{metadata.get('title', 'Paper ' + target_doi)} {PRINT_CAPTURE_TAG}".strip()
+
+        target_article_url = metadata.get("url") or f"https://doi.org/{target_doi}"
+        log_manual_pdf_url(
+            doi=target_doi,
+            title=metadata["title"],
+            target_article_url=target_article_url,
+            working_dir=w_dir
+        )
 
     # Step B: Markdown Conversion
     markdown_path = None
@@ -2190,6 +2452,7 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
         "pdf_path": str(pdf_path),
         "markdown_path": str(markdown_path) if markdown_path else None,
         "zotero": zotero_result,
+        "is_print_fallback": is_print_fallback,
     }
 
 
