@@ -23,6 +23,14 @@ sys.path.insert(0, str(ROOT / "skills" / "literature-search-review" / "scripts")
 import auth_setup
 import source_files
 try:
+    import format_print_fallback
+except ImportError:
+    try:
+        from scripts import format_print_fallback
+    except ImportError:
+        format_print_fallback = None
+
+try:
     import catalogue
 except ImportError:
     catalogue = None
@@ -334,18 +342,28 @@ def render_print_to_pdf_fallback(page, target_article_url, pdf_path, institution
         pdf_bytes = page.pdf(print_background=True)
         if isinstance(pdf_bytes, (bytes, bytearray)) and pdf_bytes.startswith(b"%PDF-"):
             pdf_path.write_bytes(pdf_bytes)
+            # Archival raw print capture
+            safe_name = pdf_path.stem
+            raw_print_path = pdf_path.parent / f"{safe_name}_raw_print.pdf"
+            raw_print_path.write_bytes(pdf_bytes)
             validate_pdf_stream(pdf_path, allow_print_fallback=True)
             rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
             rep["is_print_fallback"] = True
             rep["print_capture"] = True
             rep["print_capture_tag"] = PRINT_CAPTURE_TAG
+            rep["raw_print_path"] = str(raw_print_path)
             print(f"✓ Print-to-PDF capture successful: {pdf_path.name} ({len(pdf_bytes):,} bytes).")
+            print(f"✓ Archival raw print saved to: {raw_print_path.name}")
             return pdf_path, rep
         elif pdf_path.is_file() and is_valid_pdf_stream(pdf_path, allow_print_fallback=True):
+            raw_print_path = pdf_path.parent / f"{pdf_path.stem}_raw_print.pdf"
+            if not raw_print_path.is_file() or raw_print_path.stat().st_size != pdf_path.stat().st_size:
+                shutil.copy2(pdf_path, raw_print_path)
             rep, _ = source_files.inspect_file(pdf_path, expected="pdf")
             rep["is_print_fallback"] = True
             rep["print_capture"] = True
             rep["print_capture_tag"] = PRINT_CAPTURE_TAG
+            rep["raw_print_path"] = str(raw_print_path)
             return pdf_path, rep
     except Exception as pdf_err:
         print(f"  Automated print-to-PDF capture encountered an error: {pdf_err}")
@@ -1986,6 +2004,16 @@ def step_b_convert_to_markdown(pdf_path, metadata, source_text_dir=None):
         else:
             raise RuntimeError(f"Could not extract readable text from {pdf_path}.")
 
+    if is_fallback and format_print_fallback is not None:
+        try:
+            markdown_body = format_print_fallback.reformat_with_optional_llm(markdown_body, metadata=metadata)
+        except Exception as e:
+            print(f"  Note during print fallback Markdown cleanup: {e}")
+            try:
+                markdown_body = format_print_fallback.clean_publisher_chrome(markdown_body)
+            except Exception:
+                pass
+
     # Format authors for YAML frontmatter
     authors_yaml = []
     for author in metadata.get("authors", []):
@@ -2167,7 +2195,8 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
     # 2. PDF Copy
     validate_pdf_stream(pdf_path, allow_print_fallback=is_fallback)
     dest_pdf = package_dir / "paper.pdf"
-    shutil.copy2(pdf_path, dest_pdf)
+    if dest_pdf.resolve() != Path(pdf_path).resolve():
+        shutil.copy2(pdf_path, dest_pdf)
 
     # 3. Markdown Notes Copy
     dest_md = package_dir / "notes.md"
@@ -2175,6 +2204,26 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
 
     # 4. Intake Manifest
     tags = ["print-capture-fallback", "not-publisher-formatted-pdf"] if is_fallback else []
+    package_files_dict = {
+        "citation_ris": str(ris_file.relative_to(ROOT)) if ris_file.is_relative_to(ROOT) else str(ris_file),
+        "paper_pdf": str(dest_pdf.relative_to(ROOT)) if dest_pdf.is_relative_to(ROOT) else str(dest_pdf),
+        "notes_markdown": str(dest_md.relative_to(ROOT)) if dest_md.is_relative_to(ROOT) else str(dest_md),
+    }
+    if is_fallback:
+        raw_candidates = []
+        if metadata.get("raw_print_path"):
+            raw_candidates.append(Path(metadata["raw_print_path"]))
+        raw_candidates.extend([
+            ROOT / "downloads" / f"{safe_name}_raw_print.pdf",
+            Path(pdf_path).parent / f"{safe_name}_raw_print.pdf",
+            Path(pdf_path).parent.parent.parent / "downloads" / f"{safe_name}_raw_print.pdf",
+        ])
+        for rc in raw_candidates:
+            if rc.is_file():
+                rel_raw = str(rc.relative_to(ROOT)) if rc.is_relative_to(ROOT) else str(rc)
+                package_files_dict["raw_print_pdf"] = rel_raw
+                break
+
     manifest = {
         "paper_id": metadata.get("id", "P0001"),
         "doi": clean_doi,
@@ -2188,11 +2237,7 @@ def step_c_sync_or_package_zotero(pdf_path, markdown_path, metadata, zotero_dir=
         "print_capture": is_fallback,
         "tags": tags,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "package_files": {
-            "citation_ris": str(ris_file.relative_to(ROOT)) if ris_file.is_relative_to(ROOT) else str(ris_file),
-            "paper_pdf": str(dest_pdf.relative_to(ROOT)) if dest_pdf.is_relative_to(ROOT) else str(dest_pdf),
-            "notes_markdown": str(dest_md.relative_to(ROOT)) if dest_md.is_relative_to(ROOT) else str(dest_md)
-        },
+        "package_files": package_files_dict,
         "import_guide": {
             "zotero_desktop": f"1. In Zotero Desktop, open or create collection '{target_collection_name}'. 2. Click File -> Import... -> Select citation.ris. 3. Drag paper.pdf and notes.md onto the newly created citation item in '{target_collection_name}'.",
             "zotero_cloud": "Add ZOTERO_USER_ID and ZOTERO_API_KEY to your .env file to enable automated cloud upload."
@@ -2387,6 +2432,14 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
         if PRINT_CAPTURE_TAG not in metadata.get("title", ""):
             metadata["title"] = f"{metadata.get('title', 'Paper ' + target_doi)} {PRINT_CAPTURE_TAG}".strip()
 
+        # Save archival raw print capture to downloads/{safe_doi}_raw_print.pdf
+        if pdf_path and Path(pdf_path).is_file():
+            raw_print_pdf = Path(pdf_path).parent / f"{safe_name}_raw_print.pdf"
+            if not raw_print_pdf.is_file() or raw_print_pdf.stat().st_size != Path(pdf_path).stat().st_size:
+                shutil.copy2(pdf_path, raw_print_pdf)
+                print(f"✓ Archival raw print capture saved to: {raw_print_pdf.name}")
+            metadata["raw_print_path"] = str(raw_print_pdf)
+
         target_article_url = metadata.get("url") or f"https://doi.org/{target_doi}"
         log_manual_pdf_url(
             doi=target_doi,
@@ -2418,12 +2471,30 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
     else:
         print("Step B (Markdown Conversion) skipped by user flag.")
 
+    # Zero-Dependency Journal-Style PDF Generation for Print Fallback
+    formatted_intake_pdf = None
+    if is_print_fallback and markdown_path and Path(markdown_path).is_file() and format_print_fallback is not None:
+        try:
+            intake_root = Path(zotero_dir or ROOT / "working" / "zotero_intake").resolve()
+            package_dir = intake_root / safe_name
+            package_dir.mkdir(parents=True, exist_ok=True)
+            target_formatted_pdf = package_dir / "formatted_paper.pdf"
+            formatted_intake_pdf = format_print_fallback.format_print_capture(
+                markdown_path=markdown_path,
+                output_pdf_path=target_formatted_pdf,
+                metadata=metadata
+            )
+            print(f"✓ Formatted academic journal PDF generated: {formatted_intake_pdf.name} in {package_dir}")
+        except Exception as fmt_err:
+            print(f"  Note during print fallback PDF formatting: {fmt_err}")
+
     # Step C: Zotero Sync / Intake
     zotero_result = None
     if not skip_zotero and markdown_path:
         try:
+            pdf_for_zotero = formatted_intake_pdf if (is_print_fallback and formatted_intake_pdf and formatted_intake_pdf.is_file()) else pdf_path
             zotero_result = step_c_sync_or_package_zotero(
-                pdf_path=pdf_path,
+                pdf_path=pdf_for_zotero,
                 markdown_path=markdown_path,
                 metadata=metadata,
                 zotero_dir=zotero_dir,
@@ -2450,10 +2521,14 @@ def process_target(doi=None, ris_record=None, institution=None, state_path=None,
     return {
         "doi": target_doi,
         "pdf_path": str(pdf_path),
+        "formatted_pdf_path": str(formatted_intake_pdf) if formatted_intake_pdf else None,
         "markdown_path": str(markdown_path) if markdown_path else None,
         "zotero": zotero_result,
         "is_print_fallback": is_print_fallback,
     }
+
+
+pipeline_fetch_and_process = process_target
 
 
 def main():
