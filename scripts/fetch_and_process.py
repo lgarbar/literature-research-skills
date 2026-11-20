@@ -1687,24 +1687,12 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
                                 except Exception as fetch_err:
                                     print(f"  Direct PDF fetch note for {target_pdf_url}: {fetch_err}")
 
-                            # If no valid PDF bytes retrieved and an HTML fallback page was returned, trigger automated print-to-PDF
-                            if not pdf_bytes:
-                                print(f"⚡ Direct ScienceDirect PDF retrieval failed or returned HTML challenge/error (e.g. error 600010).")
-                                print("Activating automated print-to-PDF fallback (page.pdf())...")
-                                res_pdf, rep = render_print_to_pdf_fallback(
-                                    page=page,
-                                    target_article_url=proxied_article_url or target_article_url,
-                                    pdf_path=pdf_path,
-                                    institution=institution
+                            # If no valid PDF bytes retrieved and an HTML fallback page was returned, raise InvalidPDFError
+                            if not pdf_bytes and html_fallback_detected:
+                                raise InvalidPDFError(
+                                    f"ScienceDirect returned an HTML fallback page ({len(last_html_body) if last_html_body else 0:,} bytes) rather than valid PDF bytes. "
+                                    f"Official endpoint: {official_pdf_url}"
                                 )
-                                if res_pdf and rep:
-                                    browser.close()
-                                    return res_pdf, rep
-                                elif html_fallback_detected:
-                                    raise InvalidPDFError(
-                                        f"ScienceDirect returned an HTML fallback page ({len(last_html_body) if last_html_body else 0:,} bytes) rather than valid PDF bytes. "
-                                        f"Official endpoint: {official_pdf_url}"
-                                    )
 
                     else:
                         # General Publisher Flow (Wiley, Springer, HighWire, Silverchair, etc.)
@@ -1882,15 +1870,6 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
             pdf_path.write_bytes(pdf_bytes)
 
         if not pdf_path.is_file():
-            print(f"⚡ Direct publisher PDF retrieval failed for DOI {clean_doi}. Activating automated print-to-PDF fallback (page.pdf())...")
-            res_pdf, rep = launch_and_render_print_to_pdf(
-                target_article_url=proxied_article_url if 'proxied_article_url' in locals() else (target_article_url if 'target_article_url' in locals() else f"https://doi.org/{clean_doi}"),
-                pdf_path=pdf_path,
-                session_file=session_file if 'session_file' in locals() else None,
-                institution=institution
-            )
-            if res_pdf and rep:
-                return res_pdf, rep
             raise InvalidPDFError(f"Failed to retrieve valid PDF for DOI {clean_doi}: No PDF file was saved.")
 
         # Validation & Quality Check
@@ -1910,6 +1889,7 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
             raise RuntimeError(f"Retrieved file failed mechanical PDF verification: {report.get('errors')}")
 
         print(f"✓ Step A Complete: Verified PDF saved to {pdf_path} ({report['bytes']:,} bytes, {report.get('page_count')} pages).")
+        report["is_print_fallback"] = False
         return pdf_path, report
     except (InvalidPDFError, RuntimeError, auth_setup.InstitutionalAuthChallenge, Exception) as err:
         target_endpoint_url = getattr(err, "endpoint_url", None) or (
@@ -1920,44 +1900,60 @@ def step_a_download_paper(doi, institution=None, state_path=None, output_dir=Non
         )
         setattr(err, "endpoint_url", target_endpoint_url)
 
-        # Attempt automated print-to-PDF recovery if valid PDF was not captured
-        if not (pdf_path.is_file() and is_valid_pdf_stream(pdf_path, allow_print_fallback=True)):
-            print(f"⚡ Attempting automated print-to-PDF recovery for {clean_doi} (page.pdf())...")
+        # 1. Interactive Headed Fallback: If single-DOI interactive mode, switch to visible browser
+        if not is_batch and interactive_fallback and headless:
+            print(f"\n⚡ Headless retrieval failure on DOI {clean_doi}: {err}")
+            print("Switching from headless to interactive headed mode...")
             try:
-                res_pdf, rep = launch_and_render_print_to_pdf(
-                    target_article_url=target_endpoint_url,
+                res_pdf, rep = interactive_headed_download(
+                    doi=clean_doi,
+                    target_url=target_endpoint_url,
                     pdf_path=pdf_path,
                     session_file=session_file if 'session_file' in locals() else None,
+                    pii=sd_pii if 'sd_pii' in locals() else pii,
+                    safe_name=safe_name,
                     institution=institution
                 )
                 if res_pdf and rep:
                     return res_pdf, rep
-            except Exception as print_fallback_err:
-                print(f"  Automated print-to-PDF recovery note: {print_fallback_err}")
+            except Exception as interactive_err:
+                print(f"  Interactive headed retrieval note: {interactive_err}")
 
-        if not is_batch and interactive_fallback and headless:
-            print(f"\n⚡ Headless retrieval failure on DOI {clean_doi}: {err}")
-            print("Switching from headless to interactive headed mode...")
-            return interactive_headed_download(
-                doi=clean_doi,
-                target_url=target_endpoint_url,
+        # 2. Scoped Fallback: Triggered strictly when publisher-formatted PDF is inaccessible
+        print(f"\n⚡ Official publisher formatted PDF is inaccessible for DOI {clean_doi}.")
+        print("Activating scoped print-to-PDF fallback (page.pdf())...")
+        try:
+            res_pdf, rep = launch_and_render_print_to_pdf(
+                target_article_url=target_endpoint_url,
                 pdf_path=pdf_path,
                 session_file=session_file if 'session_file' in locals() else None,
-                pii=sd_pii if 'sd_pii' in locals() else pii,
-                safe_name=safe_name,
                 institution=institution
             )
-        else:
-            w_dir = Path(working_dir or (output_dir or ROOT / "downloads")).resolve().parent / "working"
-            log_failure(
-                doi=clean_doi,
-                failure_stage="step_a_download",
-                error=err,
-                endpoint_url=target_endpoint_url,
-                working_dir=w_dir
-            )
-            setattr(err, "_already_logged", True)
-            raise
+            if res_pdf and rep:
+                rep["is_print_fallback"] = True
+                rep["print_capture"] = True
+                w_dir = Path(working_dir or (output_dir or ROOT / "downloads")).resolve().parent / "working"
+                log_manual_pdf_url(
+                    doi=clean_doi,
+                    title=None,
+                    target_article_url=target_endpoint_url,
+                    working_dir=w_dir
+                )
+                return res_pdf, rep
+        except Exception as print_fallback_err:
+            print(f"  Scoped print-to-PDF fallback note: {print_fallback_err}")
+
+        # 3. If both direct download and scoped fallback fail, record two-tier error and re-raise
+        w_dir = Path(working_dir or (output_dir or ROOT / "downloads")).resolve().parent / "working"
+        log_failure(
+            doi=clean_doi,
+            failure_stage="step_a_download",
+            error=err,
+            endpoint_url=target_endpoint_url,
+            working_dir=w_dir
+        )
+        setattr(err, "_already_logged", True)
+        raise
 
 
 def step_b_convert_to_markdown(pdf_path, metadata, source_text_dir=None):

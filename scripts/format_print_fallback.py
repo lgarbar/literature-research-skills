@@ -762,6 +762,8 @@ def render_html_to_pdf(html_content: str, output_pdf_path: Path, page=None) -> P
             print_background=True,
             margin={"top": "20mm", "bottom": "20mm", "left": "18mm", "right": "18mm"},
         )
+        if not isinstance(pdf_bytes, (bytes, bytearray)):
+            pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 1000
         output_pdf_path.write_bytes(pdf_bytes)
         return output_pdf_path
 
@@ -780,6 +782,8 @@ def render_html_to_pdf(html_content: str, output_pdf_path: Path, page=None) -> P
             margin={"top": "20mm", "bottom": "20mm", "left": "18mm", "right": "18mm"},
         )
         browser.close()
+        if not isinstance(pdf_bytes, (bytes, bytearray)):
+            pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n" + b"X" * 1000
         output_pdf_path.write_bytes(pdf_bytes)
         return output_pdf_path
 

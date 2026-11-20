@@ -206,7 +206,7 @@ class TestPrintToPDFFallback(unittest.TestCase):
                                 zotero_dir=self.zotero_dir,
                                 skip_oa=True,
                                 headless=True,
-                                interactive_fallback=True,
+                                interactive_fallback=False,
                                 is_batch=False,
                                 working_dir=self.working_dir
                             )
@@ -333,8 +333,8 @@ class TestPrintToPDFFallback(unittest.TestCase):
                             mock_headed.assert_not_called()
                             mock_input.assert_not_called()
 
-                            audit_file = ROOT / "working" / "error_audit.jsonl"
-                            summary_file = ROOT / "working" / "failed_papers.log"
+                            audit_file = self.working_dir / "error_audit.jsonl"
+                            summary_file = self.working_dir / "failed_papers.log"
                             self.assertTrue(audit_file.is_file())
                             self.assertTrue(summary_file.is_file())
 

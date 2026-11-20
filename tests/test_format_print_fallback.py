@@ -370,9 +370,12 @@ class TestPipelineIntegrationWithPrintFallback(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def _create_minimal_pdf(self, path: Path, text: str = "Sample content"):
-        # Generate valid PDF with Playwright
+        # Generate valid PDF with Playwright and pad to > 100 KB
         html_src = f"<html><body><h1>Print Capture Paper</h1><p>Reading Assistant</p><p>powered by LeapSpace</p><p>{text}</p><p>Actions you could take:</p><p>Download: Download high-res image</p><h2>References</h2><p>[1] Ref 2024</p></body></html>"
         format_print_fallback.render_html_to_pdf(html_src, path)
+        raw = path.read_bytes()
+        if len(raw) < 110000:
+            path.write_bytes(raw + b"\n% " + b"0" * (115000 - len(raw)))
 
     def test_pipeline_print_fallback_archival_and_formatted_zotero(self):
         doi = "10.1016/j.sample.2024.1001"
@@ -438,6 +441,66 @@ class TestPipelineIntegrationWithPrintFallback(unittest.TestCase):
         self.assertTrue(manifest_data["is_print_fallback"])
         self.assertIn("print-capture-fallback", manifest_data["tags"])
         self.assertIn("raw_print_pdf", manifest_data["package_files"])
+
+    def test_accessible_paper_normal_pipeline_no_reformatting_or_tags(self):
+        """Verify Requirement 1: Accessible papers that download cleanly must follow the normal pipeline
+        without extra reformatting, secondary PDF generation, or print-fallback tags."""
+        doi = "10.1016/j.cell.2024.01.999"
+        safe_name = fetch_and_process.doi_to_filename(doi)
+        clean_pdf_path = self.downloads_dir / f"{safe_name}.pdf"
+        self._create_minimal_pdf(clean_pdf_path, text="Official typeset content without publisher clutter.")
+
+        mock_report = {
+            "is_print_fallback": False,
+            "mechanical_status": "pass",
+            "bytes": clean_pdf_path.stat().st_size,
+            "page_count": 12,
+        }
+
+        with patch("fetch_and_process.step_a_download_paper", return_value=(clean_pdf_path, mock_report)), \
+             patch("fetch_and_process.auth_setup.get_active_institution", return_value={"name": "Test Univ", "id": "test"}), \
+             patch("fetch_and_process.resolve_doi_metadata", return_value={"title": "Official Typeset Paper", "year": "2024", "venue": "Cell", "authors": ["Author, One"]}):
+
+            res = fetch_and_process.process_target(
+                doi=doi,
+                output_dir=self.downloads_dir,
+                source_text_dir=self.source_text_dir,
+                zotero_dir=self.zotero_dir,
+                skip_download=False,
+                skip_oa=True,
+            )
+
+        # 1. Normal download verification
+        self.assertFalse(res["is_print_fallback"], "Accessible paper must have is_print_fallback=False")
+        self.assertIsNone(res.get("formatted_pdf_path"), "Accessible paper must not generate secondary formatted PDF")
+
+        # 2. No archival raw print file created
+        raw_print_file = self.downloads_dir / f"{safe_name}_raw_print.pdf"
+        self.assertFalse(raw_print_file.exists(), "Accessible paper must not create raw_print file")
+
+        # 3. Markdown must NOT contain print fallback tags
+        md_file = self.source_text_dir / f"{safe_name}.md"
+        self.assertTrue(md_file.is_file())
+        md_content = md_file.read_text(encoding="utf-8")
+        self.assertNotIn("is_print_fallback", md_content)
+        self.assertNotIn("print_capture", md_content)
+
+        # 4. Zotero intake must package official publisher PDF directly without fallback tags
+        intake_package = self.zotero_dir / safe_name
+        self.assertFalse((intake_package / "formatted_paper.pdf").exists(), "Must not generate formatted_paper.pdf for normal paper")
+        paper_pdf = intake_package / "paper.pdf"
+        self.assertTrue(paper_pdf.is_file())
+        self.assertEqual(paper_pdf.read_bytes(), clean_pdf_path.read_bytes(), "paper.pdf must be exact copy of publisher PDF")
+
+        # 5. Manifest must have no fallback tags and clean title
+        manifest_file = intake_package / "manifest.json"
+        self.assertTrue(manifest_file.is_file())
+        import json
+        manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertFalse(manifest_data["is_print_fallback"])
+        self.assertEqual(manifest_data["tags"], [])
+        self.assertNotIn("capture_note", manifest_data)
+        self.assertEqual(manifest_data["title"], "Official Typeset Paper")
 
 
 if __name__ == "__main__":
